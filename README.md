@@ -1,13 +1,45 @@
-GoKit Lite
+# Project Structure
 
-A lightweight open-source Go toolkit providing reusable backend utilities for Go applications.
+```text
+gokit-lite/
+├── response/
+├── validator/
+├── config/
+├── logger/
+├── cache/
+├── ratelimit/
+├── auth/
+├── monitor/
+├── examples/
+├── docs/
+├── tests/
+└── .github/workflows/
+```
 
-Modules:
-- Response
-- Config
-- Validator
-- Logger
-- Cache
-- Rate Limiter
-- Auth
-- Monitor
+## Ownership
+
+### Ganesh
+
+* response
+* validator
+* auth
+* monitor
+* docs
+
+### Shreyas
+
+* config
+* logger
+* cache
+* ratelimit
+
+## Rules
+
+* No direct commits to main
+* Create feature branches from develop
+* Open PRs to develop
+* Review each other's PRs
+* Write tests for every module
+
+```
+```
