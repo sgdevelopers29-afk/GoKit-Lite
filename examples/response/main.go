@@ -7,6 +7,7 @@ import (
 	"github.com/sgdevelopers29-afk/GoKit-Lite/response"
 )
 
+// This example demonstrates how to use the response package to create a standard API response format.
 func main() {
 
 	user := map[string]string{
