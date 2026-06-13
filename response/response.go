@@ -1,5 +1,6 @@
 package response
 
+// Response is a struct that represents a standard API response format.
 type Response struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
