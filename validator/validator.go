@@ -2,19 +2,25 @@
 // for Go. It reads validation rules from struct field tags and returns a
 // structured [ValidationError] on the first violated rule.
 //
-// Supported tags (V2):
+// Supported tags (V3):
 //
-//   - required:"true"  — the field must not be its zero value
-//   - min:"<n>"        — numeric field must be >= n
-//   - max:"<n>"        — numeric field must be <= n
-//   - email:"true"     — string field must be a valid e-mail address
+//   - required:"true"       — the field must not be its zero value
+//   - min:"<n>"             — numeric field must be >= n
+//   - max:"<n>"             — numeric field must be <= n
+//   - email:"true"          — string field must be a valid e-mail address
+//   - minLength:"<n>"       — string field must have at least n Unicode code points
+//   - maxLength:"<n>"       — string field must have at most n Unicode code points
+//   - regex:"<pattern>"     — string field must match the given regular expression
+//   - oneOf:"<a>,<b>,..."   — string field must be one of the comma-separated values
 //
 // Usage:
 //
 //	type User struct {
-//	    Name  string `required:"true"`
-//	    Age   int    `min:"18" max:"120"`
-//	    Email string `required:"true" email:"true"`
+//	    Name     string `required:"true" minLength:"2" maxLength:"50"`
+//	    Age      int    `min:"18" max:"120"`
+//	    Email    string `required:"true" email:"true"`
+//	    Phone    string `regex:"^[0-9]{10}$"`
+//	    Role     string `oneOf:"admin,user,guest"`
 //	}
 //
 //	if err := validator.Validate(user); err != nil {
@@ -31,12 +37,20 @@ import (
 	"reflect"
 	"regexp"
 	"strconv"
+	"strings"
+	"sync"
+	"unicode/utf8"
 )
 
 // emailRegexp is the compiled regular expression used for e-mail validation.
 // It follows the most common subset of RFC 5322 that covers real-world addresses.
 // Compiled once at package initialisation to avoid per-call overhead.
 var emailRegexp = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
+
+// regexpCache stores previously compiled *regexp.Regexp instances keyed by
+// pattern string. Using sync.Map means concurrent calls to Validate with the
+// same regex pattern pay the compilation cost only once.
+var regexpCache sync.Map
 
 // Validate inspects every exported field of data using struct tags and returns
 // a [*ValidationError] for the first rule violation it finds.
@@ -49,6 +63,10 @@ var emailRegexp = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA
 //  2. min
 //  3. max
 //  4. email
+//  5. minLength
+//  6. maxLength
+//  7. regex
+//  8. oneOf
 //
 // Validate stops and returns on the very first failure (fail-fast). If all
 // fields pass, nil is returned.
@@ -97,6 +115,22 @@ func Validate(data any) error {
 		}
 
 		if err := applyEmail(field, fieldVal); err != nil {
+			return err
+		}
+
+		if err := applyMinLength(field, fieldVal); err != nil {
+			return err
+		}
+
+		if err := applyMaxLength(field, fieldVal); err != nil {
+			return err
+		}
+
+		if err := applyRegex(field, fieldVal); err != nil {
+			return err
+		}
+
+		if err := applyOneOf(field, fieldVal); err != nil {
 			return err
 		}
 	}
@@ -264,6 +298,177 @@ func applyEmail(field reflect.StructField, val reflect.Value) error {
 		)
 	}
 	return nil
+}
+
+// applyMinLength returns a ValidationError when the field carries a
+// `minLength:"<n>"` tag and the string's Unicode code-point count is strictly
+// less than n.
+//
+// Length is measured with [utf8.RuneCountInString] so that multibyte characters
+// (e.g. emoji, CJK) count as one unit, matching user-visible length.
+// The tag is only evaluated on string kinds; for all other kinds it is a no-op.
+func applyMinLength(field reflect.StructField, val reflect.Value) error {
+	tag := field.Tag.Get("minLength")
+	if tag == "" {
+		return nil
+	}
+
+	limit, err := strconv.Atoi(tag)
+	if err != nil {
+		return fmt.Errorf(
+			"validator: field %s has an invalid minLength tag value %q (must be a non-negative integer): %w",
+			field.Name, tag, err,
+		)
+	}
+	if limit < 0 {
+		return fmt.Errorf(
+			"validator: field %s has a negative minLength tag value %d",
+			field.Name, limit,
+		)
+	}
+
+	if val.Kind() != reflect.String {
+		// minLength on a non-string field is silently ignored — numeric types
+		// use min instead.
+		return nil
+	}
+
+	if utf8.RuneCountInString(val.String()) < limit {
+		return newValidationError(
+			field.Name,
+			"minLength",
+			fmt.Sprintf("field %s must have at least %d character(s), got %d",
+				field.Name, limit, utf8.RuneCountInString(val.String())),
+		)
+	}
+	return nil
+}
+
+// applyMaxLength returns a ValidationError when the field carries a
+// `maxLength:"<n>"` tag and the string's Unicode code-point count is strictly
+// greater than n.
+//
+// The same utf8.RuneCountInString semantics as applyMinLength apply.
+func applyMaxLength(field reflect.StructField, val reflect.Value) error {
+	tag := field.Tag.Get("maxLength")
+	if tag == "" {
+		return nil
+	}
+
+	limit, err := strconv.Atoi(tag)
+	if err != nil {
+		return fmt.Errorf(
+			"validator: field %s has an invalid maxLength tag value %q (must be a non-negative integer): %w",
+			field.Name, tag, err,
+		)
+	}
+	if limit < 0 {
+		return fmt.Errorf(
+			"validator: field %s has a negative maxLength tag value %d",
+			field.Name, limit,
+		)
+	}
+
+	if val.Kind() != reflect.String {
+		return nil
+	}
+
+	if utf8.RuneCountInString(val.String()) > limit {
+		return newValidationError(
+			field.Name,
+			"maxLength",
+			fmt.Sprintf("field %s must have at most %d character(s), got %d",
+				field.Name, limit, utf8.RuneCountInString(val.String())),
+		)
+	}
+	return nil
+}
+
+// applyRegex returns a ValidationError when the field carries a
+// `regex:"<pattern>"` tag and the field's string value does not match the
+// pattern.
+//
+// Compiled patterns are cached in a package-level [sync.Map] so each unique
+// pattern string is compiled at most once, regardless of how many times
+// Validate is called concurrently.
+//
+// A malformed pattern (one that fails [regexp.Compile]) surfaces a wrapped
+// error rather than panicking, so library users get a clear diagnostic.
+//
+// The tag is only evaluated on string kinds; other kinds are silently skipped.
+func applyRegex(field reflect.StructField, val reflect.Value) error {
+	pattern := field.Tag.Get("regex")
+	if pattern == "" {
+		return nil
+	}
+
+	if val.Kind() != reflect.String {
+		return nil
+	}
+
+	// Look up the compiled regexp in the cache; compile and store if absent.
+	var re *regexp.Regexp
+	if cached, ok := regexpCache.Load(pattern); ok {
+		re = cached.(*regexp.Regexp)
+	} else {
+		compiled, err := regexp.Compile(pattern)
+		if err != nil {
+			return fmt.Errorf(
+				"validator: field %s has an invalid regex tag pattern %q: %w",
+				field.Name, pattern, err,
+			)
+		}
+		// Store may race with another goroutine, but both values are equivalent
+		// compiled regexps for the same pattern — the last writer wins harmlessly.
+		regexpCache.Store(pattern, compiled)
+		re = compiled
+	}
+
+	if !re.MatchString(val.String()) {
+		return newValidationError(
+			field.Name,
+			"regex",
+			fmt.Sprintf("field %s must match pattern %q", field.Name, pattern),
+		)
+	}
+	return nil
+}
+
+// applyOneOf returns a ValidationError when the field carries a
+// `oneOf:"<a>,<b>,..."` tag and the field's string value is not one of the
+// comma-separated allowed values.
+//
+// Matching is exact and case-sensitive. Leading/trailing whitespace in tag
+// values is trimmed so that `oneOf:"admin, user, guest"` works as expected.
+//
+// An empty tag value (`oneOf:""`) is treated as a single allowed value: the
+// empty string — consistent with how [strings.Split] behaves.
+//
+// The tag is only evaluated on string kinds; other kinds are silently skipped.
+func applyOneOf(field reflect.StructField, val reflect.Value) error {
+	tag := field.Tag.Get("oneOf")
+	if tag == "" {
+		return nil
+	}
+
+	if val.Kind() != reflect.String {
+		return nil
+	}
+
+	allowed := strings.Split(tag, ",")
+	got := val.String()
+
+	for _, choice := range allowed {
+		if strings.TrimSpace(choice) == got {
+			return nil
+		}
+	}
+
+	return newValidationError(
+		field.Name,
+		"oneOf",
+		fmt.Sprintf("field %s must be one of [%s], got %q", field.Name, tag, got),
+	)
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

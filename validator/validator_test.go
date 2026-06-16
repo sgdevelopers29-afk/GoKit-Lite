@@ -399,3 +399,385 @@ func TestValidate_Email_OnEmptyString_Fails(t *testing.T) {
 	err := Validate(emailOnlyUser{Email: ""})
 	assertValidationError(t, err, "Email", "email")
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Validator V3 tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── V3 test fixtures ──────────────────────────────────────────────────────────
+
+type minLengthUser struct {
+	Username string `minLength:"3"`
+}
+
+type maxLengthUser struct {
+	Username string `maxLength:"20"`
+}
+
+type regexUser struct {
+	Phone string `regex:"^[0-9]{10}$"`
+}
+
+type oneOfUser struct {
+	Role string `oneOf:"admin,user,guest"`
+}
+
+// v3FullUser exercises every V3 tag alongside V2 tags.
+type v3FullUser struct {
+	Name     string `required:"true" minLength:"2" maxLength:"50"`
+	Age      int    `min:"18" max:"120"`
+	Email    string `required:"true" email:"true"`
+	Phone    string `regex:"^[0-9]{10}$"`
+	Role     string `oneOf:"admin,user,guest"`
+}
+
+// ── minLength ─────────────────────────────────────────────────────────────────
+
+func TestValidate_MinLength_BelowLimit(t *testing.T) {
+	err := Validate(minLengthUser{Username: "ab"})
+	assertValidationError(t, err, "Username", "minLength")
+}
+
+func TestValidate_MinLength_AtLimit(t *testing.T) {
+	if err := Validate(minLengthUser{Username: "abc"}); err != nil {
+		t.Fatalf("expected nil at boundary (3 chars), got %v", err)
+	}
+}
+
+func TestValidate_MinLength_AboveLimit(t *testing.T) {
+	if err := Validate(minLengthUser{Username: "ganesh"}); err != nil {
+		t.Fatalf("expected nil above limit, got %v", err)
+	}
+}
+
+func TestValidate_MinLength_EmptyString_Fails(t *testing.T) {
+	err := Validate(minLengthUser{Username: ""})
+	assertValidationError(t, err, "Username", "minLength")
+}
+
+func TestValidate_MinLength_Zero_AlwaysPasses(t *testing.T) {
+	type s struct {
+		Name string `minLength:"0"`
+	}
+	// Any string (including empty) satisfies minLength:"0".
+	if err := Validate(s{Name: ""}); err != nil {
+		t.Fatalf("expected nil for minLength:0 with empty string, got %v", err)
+	}
+}
+
+func TestValidate_MinLength_UnicodeMultibyte(t *testing.T) {
+	// "日本語" is 3 runes but more than 3 bytes.
+	// minLength:"3" should pass because rune count == 3.
+	type s struct {
+		Text string `minLength:"3"`
+	}
+	if err := Validate(s{Text: "日本語"}); err != nil {
+		t.Fatalf("expected nil for 3-rune multibyte string with minLength:3, got %v", err)
+	}
+}
+
+func TestValidate_MinLength_UnicodeBelow(t *testing.T) {
+	// "日本" is only 2 runes — should fail minLength:"3".
+	type s struct {
+		Text string `minLength:"3"`
+	}
+	err := Validate(s{Text: "日本"})
+	assertValidationError(t, err, "Text", "minLength")
+}
+
+// ── maxLength ─────────────────────────────────────────────────────────────────
+
+func TestValidate_MaxLength_AboveLimit(t *testing.T) {
+	err := Validate(maxLengthUser{Username: "thisusernameiswaytoolong"})
+	assertValidationError(t, err, "Username", "maxLength")
+}
+
+func TestValidate_MaxLength_AtLimit(t *testing.T) {
+	// Exactly 20 chars.
+	if err := Validate(maxLengthUser{Username: "twentycharacteruserx"}); err != nil {
+		t.Fatalf("expected nil at boundary (20 chars), got %v", err)
+	}
+}
+
+func TestValidate_MaxLength_BelowLimit(t *testing.T) {
+	if err := Validate(maxLengthUser{Username: "ganesh"}); err != nil {
+		t.Fatalf("expected nil below limit, got %v", err)
+	}
+}
+
+func TestValidate_MaxLength_EmptyString_Passes(t *testing.T) {
+	if err := Validate(maxLengthUser{Username: ""}); err != nil {
+		t.Fatalf("expected nil for empty string with maxLength:20, got %v", err)
+	}
+}
+
+func TestValidate_MaxLength_ZeroLimit_EmptyStringPasses(t *testing.T) {
+	type s struct {
+		Name string `maxLength:"0"`
+	}
+	if err := Validate(s{Name: ""}); err != nil {
+		t.Fatalf("expected nil for empty string with maxLength:0, got %v", err)
+	}
+}
+
+func TestValidate_MaxLength_ZeroLimit_NonEmptyFails(t *testing.T) {
+	type s struct {
+		Name string `maxLength:"0"`
+	}
+	err := Validate(s{Name: "a"})
+	assertValidationError(t, err, "Name", "maxLength")
+}
+
+func TestValidate_MaxLength_UnicodeMultibyte(t *testing.T) {
+	// "日本語テスト" is 6 runes; maxLength:"5" should fail.
+	type s struct {
+		Text string `maxLength:"5"`
+	}
+	err := Validate(s{Text: "日本語テスト"})
+	assertValidationError(t, err, "Text", "maxLength")
+}
+
+func TestValidate_MaxLength_UnicodeAtLimit(t *testing.T) {
+	// "日本語テス" is exactly 5 runes; maxLength:"5" should pass.
+	type s struct {
+		Text string `maxLength:"5"`
+	}
+	if err := Validate(s{Text: "日本語テス"}); err != nil {
+		t.Fatalf("expected nil for 5-rune string with maxLength:5, got %v", err)
+	}
+}
+
+// ── regex ─────────────────────────────────────────────────────────────────────
+
+func TestValidate_Regex_Valid(t *testing.T) {
+	if err := Validate(regexUser{Phone: "9876543210"}); err != nil {
+		t.Fatalf("expected nil for valid 10-digit phone, got %v", err)
+	}
+}
+
+func TestValidate_Regex_Invalid_Alpha(t *testing.T) {
+	err := Validate(regexUser{Phone: "abc123"})
+	assertValidationError(t, err, "Phone", "regex")
+}
+
+func TestValidate_Regex_Invalid_TooShort(t *testing.T) {
+	err := Validate(regexUser{Phone: "12345"})
+	assertValidationError(t, err, "Phone", "regex")
+}
+
+func TestValidate_Regex_Invalid_TooLong(t *testing.T) {
+	err := Validate(regexUser{Phone: "98765432101"})
+	assertValidationError(t, err, "Phone", "regex")
+}
+
+func TestValidate_Regex_EmptyString_Fails(t *testing.T) {
+	err := Validate(regexUser{Phone: ""})
+	assertValidationError(t, err, "Phone", "regex")
+}
+
+func TestValidate_Regex_CacheHit(t *testing.T) {
+	// Call Validate twice with the same struct to exercise the regexpCache
+	// Store/Load path without panicking.
+	u := regexUser{Phone: "1234567890"}
+	for i := 0; i < 3; i++ {
+		if err := Validate(u); err != nil {
+			t.Fatalf("iteration %d: expected nil, got %v", i, err)
+		}
+	}
+}
+
+func TestValidate_Regex_InvalidPattern_ReturnsError(t *testing.T) {
+	type s struct {
+		Field string `regex:"[invalid"`
+	}
+	err := Validate(s{Field: "anything"})
+	if err == nil {
+		t.Fatal("expected error for malformed regex pattern")
+	}
+	// Must NOT be a *ValidationError — it is a programming error, not a field error.
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		t.Fatalf("expected plain error for malformed pattern, got *ValidationError: %v", ve)
+	}
+}
+
+func TestValidate_Regex_AnchoredPattern(t *testing.T) {
+	// Ensures anchored patterns work: "^foo$" must not match "foobar".
+	type s struct {
+		Code string `regex:"^foo$"`
+	}
+	if err := Validate(s{Code: "foo"}); err != nil {
+		t.Fatalf("expected nil for exact match, got %v", err)
+	}
+	err := Validate(s{Code: "foobar"})
+	assertValidationError(t, err, "Code", "regex")
+}
+
+// ── oneOf ─────────────────────────────────────────────────────────────────────
+
+func TestValidate_OneOf_Valid(t *testing.T) {
+	roles := []string{"admin", "user", "guest"}
+	for _, r := range roles {
+		t.Run(r, func(t *testing.T) {
+			if err := Validate(oneOfUser{Role: r}); err != nil {
+				t.Errorf("expected nil for role %q, got %v", r, err)
+			}
+		})
+	}
+}
+
+func TestValidate_OneOf_Invalid(t *testing.T) {
+	err := Validate(oneOfUser{Role: "superadmin"})
+	assertValidationError(t, err, "Role", "oneOf")
+}
+
+func TestValidate_OneOf_EmptyValue_Fails(t *testing.T) {
+	err := Validate(oneOfUser{Role: ""})
+	assertValidationError(t, err, "Role", "oneOf")
+}
+
+func TestValidate_OneOf_CaseSensitive(t *testing.T) {
+	// "Admin" (capital A) is not in "admin,user,guest".
+	err := Validate(oneOfUser{Role: "Admin"})
+	assertValidationError(t, err, "Role", "oneOf")
+}
+
+func TestValidate_OneOf_WhitespaceTrimming(t *testing.T) {
+	// Tag with spaces around values: "admin, user, guest"
+	type s struct {
+		Role string `oneOf:"admin, user, guest"`
+	}
+	// "user" (no extra spaces) must still match " user" entry after trimming.
+	if err := Validate(s{Role: "user"}); err != nil {
+		t.Fatalf("expected nil after whitespace trimming, got %v", err)
+	}
+}
+
+func TestValidate_OneOf_SingleOption(t *testing.T) {
+	type s struct {
+		Status string `oneOf:"active"`
+	}
+	if err := Validate(s{Status: "active"}); err != nil {
+		t.Fatalf("expected nil for single-option oneOf, got %v", err)
+	}
+	err := Validate(s{Status: "inactive"})
+	assertValidationError(t, err, "Status", "oneOf")
+}
+
+// ── V3 combined / integration tests ──────────────────────────────────────────
+
+func TestValidate_V3FullUser_Valid(t *testing.T) {
+	u := v3FullUser{
+		Name:  "Ganesh",
+		Age:   22,
+		Email: "ganesh@gmail.com",
+		Phone: "9876543210",
+		Role:  "admin",
+	}
+	if err := Validate(u); err != nil {
+		t.Fatalf("expected nil for fully valid v3FullUser, got %v", err)
+	}
+}
+
+func TestValidate_V3FullUser_RequiredFails(t *testing.T) {
+	u := v3FullUser{Age: 22, Email: "g@g.com", Phone: "9876543210", Role: "admin"}
+	assertValidationError(t, Validate(u), "Name", "required")
+}
+
+func TestValidate_V3FullUser_MinLengthFails(t *testing.T) {
+	u := v3FullUser{Name: "G", Age: 22, Email: "g@g.com", Phone: "9876543210", Role: "admin"}
+	assertValidationError(t, Validate(u), "Name", "minLength")
+}
+
+func TestValidate_V3FullUser_MaxLengthFails(t *testing.T) {
+	// 51 ASCII characters — exceeds maxLength:"50".
+	u := v3FullUser{
+		Name:  "GaneshKumarWithAReallyReallyReallyLongNameOverFifty",
+		Age:   22,
+		Email: "g@g.com",
+		Phone: "9876543210",
+		Role:  "admin",
+	}
+	assertValidationError(t, Validate(u), "Name", "maxLength")
+}
+
+func TestValidate_V3FullUser_RegexFails(t *testing.T) {
+	u := v3FullUser{Name: "Ganesh", Age: 22, Email: "g@g.com", Phone: "BADPHONE", Role: "admin"}
+	assertValidationError(t, Validate(u), "Phone", "regex")
+}
+
+func TestValidate_V3FullUser_OneOfFails(t *testing.T) {
+	u := v3FullUser{Name: "Ganesh", Age: 22, Email: "g@g.com", Phone: "9876543210", Role: "superadmin"}
+	assertValidationError(t, Validate(u), "Role", "oneOf")
+}
+
+func TestValidate_V3FullUser_PointerValid(t *testing.T) {
+	u := &v3FullUser{
+		Name:  "Ganesh",
+		Age:   22,
+		Email: "ganesh@gmail.com",
+		Phone: "9876543210",
+		Role:  "user",
+	}
+	if err := Validate(u); err != nil {
+		t.Fatalf("expected nil for valid *v3FullUser, got %v", err)
+	}
+}
+
+// ── V3 edge-cases ─────────────────────────────────────────────────────────────
+
+func TestValidate_MinLength_OnNonString_NoOp(t *testing.T) {
+	// minLength on an int field must be silently ignored (no-op).
+	type s struct {
+		Age int `minLength:"3"`
+	}
+	if err := Validate(s{Age: 1}); err != nil {
+		t.Fatalf("minLength on int should be a no-op, got %v", err)
+	}
+}
+
+func TestValidate_MaxLength_OnNonString_NoOp(t *testing.T) {
+	type s struct {
+		Age int `maxLength:"3"`
+	}
+	if err := Validate(s{Age: 9999}); err != nil {
+		t.Fatalf("maxLength on int should be a no-op, got %v", err)
+	}
+}
+
+func TestValidate_Regex_OnNonString_NoOp(t *testing.T) {
+	type s struct {
+		Age int `regex:"^[0-9]+$"`
+	}
+	if err := Validate(s{Age: 42}); err != nil {
+		t.Fatalf("regex on int should be a no-op, got %v", err)
+	}
+}
+
+func TestValidate_OneOf_OnNonString_NoOp(t *testing.T) {
+	type s struct {
+		Level int `oneOf:"1,2,3"`
+	}
+	if err := Validate(s{Level: 99}); err != nil {
+		t.Fatalf("oneOf on int should be a no-op, got %v", err)
+	}
+}
+
+func TestValidate_MinMaxLength_BothPresent_MinCheckedFirst(t *testing.T) {
+	// minLength is applied before maxLength; with an impossible range and a
+	// value that violates both, minLength error must be returned.
+	type s struct {
+		// degenerate: min > max; value "a" (len 1) violates minLength:"5" first.
+		Name string `minLength:"5" maxLength:"3"`
+	}
+	assertValidationError(t, Validate(s{Name: "a"}), "Name", "minLength")
+}
+
+func TestValidate_RuleOrderV3(t *testing.T) {
+	// A field that violates both required and minLength: required is checked
+	// first, so the required error should be returned.
+	type s struct {
+		Name string `required:"true" minLength:"5"`
+	}
+	assertValidationError(t, Validate(s{Name: ""}), "Name", "required")
+}
