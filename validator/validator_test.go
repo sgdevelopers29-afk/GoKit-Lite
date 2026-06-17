@@ -2,6 +2,7 @@ package validator
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -780,4 +781,549 @@ func TestValidate_RuleOrderV3(t *testing.T) {
 		Name string `required:"true" minLength:"5"`
 	}
 	assertValidationError(t, Validate(s{Name: ""}), "Name", "required")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Validator V4 tests — Nested Struct, Slice, Map, Recursive Engine
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── V4 test fixtures ──────────────────────────────────────────────────────────
+
+// v4Address is a nested struct used by V4 tests.
+type v4Address struct {
+	City    string `required:"true"`
+	Pincode string `regex:"^[0-9]{6}$"`
+}
+
+// v4User is a top-level struct that embeds a nested struct, a slice, and a map.
+type v4User struct {
+	Name     string            `required:"true" minLength:"2"`
+	Age      int               `min:"18" max:"120"`
+	Address  v4Address
+	Skills   []string          `required:"true"`
+	Metadata map[string]string `required:"true"`
+}
+
+// v4Tag is a struct used as a slice/map element with its own validation tags.
+type v4Tag struct {
+	Label string `required:"true" minLength:"1"`
+	Value string `oneOf:"low,medium,high"`
+}
+
+// v4Deep is used for 3-level nesting tests.
+type v4Deep struct {
+	Level1 struct {
+		Level2 struct {
+			Name string `required:"true"`
+		}
+	}
+}
+
+// ── Nested struct validation ───────────────────────────────────────────────────
+
+func TestValidate_V4_NestedStruct_Valid(t *testing.T) {
+	u := v4User{
+		Name:     "Ganesh",
+		Age:      22,
+		Address:  v4Address{City: "Mumbai", Pincode: "400001"},
+		Skills:   []string{"Go"},
+		Metadata: map[string]string{"role": "dev"},
+	}
+	if err := Validate(u); err != nil {
+		t.Fatalf("expected nil for fully valid v4User, got %v", err)
+	}
+}
+
+func TestValidate_V4_NestedStruct_RequiredFieldMissing(t *testing.T) {
+	// Address.City is required but empty — error must carry qualified path.
+	u := v4User{
+		Name:     "Ganesh",
+		Age:      22,
+		Address:  v4Address{City: "", Pincode: "400001"},
+		Skills:   []string{"Go"},
+		Metadata: map[string]string{"role": "dev"},
+	}
+	err := Validate(u)
+	assertValidationError(t, err, "Address.City", "required")
+}
+
+func TestValidate_V4_NestedStruct_RegexFailure(t *testing.T) {
+	// Address.Pincode fails regex — qualified path must be "Address.Pincode".
+	u := v4User{
+		Name:     "Ganesh",
+		Age:      22,
+		Address:  v4Address{City: "Mumbai", Pincode: "BAD"},
+		Skills:   []string{"Go"},
+		Metadata: map[string]string{"role": "dev"},
+	}
+	err := Validate(u)
+	assertValidationError(t, err, "Address.Pincode", "regex")
+}
+
+func TestValidate_V4_NestedStruct_TopLevelCheckedBeforeNested(t *testing.T) {
+	// Root-level Name is empty — must be caught before descending into Address.
+	u := v4User{
+		Name:     "",
+		Age:      22,
+		Address:  v4Address{City: "Mumbai", Pincode: "400001"},
+		Skills:   []string{"Go"},
+		Metadata: map[string]string{"role": "dev"},
+	}
+	err := Validate(u)
+	assertValidationError(t, err, "Name", "required")
+}
+
+func TestValidate_V4_NestedStruct_ThreeLevelsDeep(t *testing.T) {
+	// Level1.Level2.Name is required but empty.
+	d := v4Deep{}
+	err := Validate(d)
+	assertValidationError(t, err, "Level1.Level2.Name", "required")
+}
+
+func TestValidate_V4_NestedStruct_ThreeLevelsDeep_Valid(t *testing.T) {
+	d := v4Deep{}
+	d.Level1.Level2.Name = "deep"
+	if err := Validate(d); err != nil {
+		t.Fatalf("expected nil for valid 3-level nested struct, got %v", err)
+	}
+}
+
+// Pointer-to-struct nested field — valid (non-nil, valid inner field).
+func TestValidate_V4_PointerToNestedStruct_Valid(t *testing.T) {
+	type profile struct {
+		Bio string `required:"true"`
+	}
+	type user struct {
+		Name    string   `required:"true"`
+		Profile *profile
+	}
+	u := user{Name: "Ganesh", Profile: &profile{Bio: "developer"}}
+	if err := Validate(u); err != nil {
+		t.Fatalf("expected nil for valid pointer-to-nested-struct, got %v", err)
+	}
+}
+
+// Pointer-to-struct nested field — nil pointer must be skipped (no panic),
+// unless the field itself is marked required.
+func TestValidate_V4_PointerToNestedStruct_NilSkipped(t *testing.T) {
+	type profile struct {
+		Bio string `required:"true"`
+	}
+	type user struct {
+		Name    string   `required:"true"`
+		Profile *profile // no required tag — nil is acceptable
+	}
+	u := user{Name: "Ganesh", Profile: nil}
+	if err := Validate(u); err != nil {
+		t.Fatalf("nil pointer-to-struct without required tag must be skipped, got %v", err)
+	}
+}
+
+// Pointer-to-struct nested field — nil pointer WITH required tag must fail.
+func TestValidate_V4_PointerToNestedStruct_NilRequired(t *testing.T) {
+	type profile struct {
+		Bio string `required:"true"`
+	}
+	type user struct {
+		Name    string   `required:"true"`
+		Profile *profile `required:"true"`
+	}
+	u := user{Name: "Ganesh", Profile: nil}
+	err := Validate(u)
+	assertValidationError(t, err, "Profile", "required")
+}
+
+// Pointer-to-struct nested field — invalid inner field must be caught.
+func TestValidate_V4_PointerToNestedStruct_InvalidInner(t *testing.T) {
+	type profile struct {
+		Bio string `required:"true"`
+	}
+	type user struct {
+		Name    string   `required:"true"`
+		Profile *profile
+	}
+	u := user{Name: "Ganesh", Profile: &profile{Bio: ""}}
+	err := Validate(u)
+	assertValidationError(t, err, "Profile.Bio", "required")
+}
+
+// ── Slice validation ───────────────────────────────────────────────────────────
+
+func TestValidate_V4_Slice_Required_NilFails(t *testing.T) {
+	// A nil slice with required:"true" must fail.
+	type s struct {
+		Tags []string `required:"true"`
+	}
+	err := Validate(s{Tags: nil})
+	assertValidationError(t, err, "Tags", "required")
+}
+
+func TestValidate_V4_Slice_Required_EmptyFails(t *testing.T) {
+	// An initialised but empty slice with required:"true" must also fail.
+	type s struct {
+		Tags []string `required:"true"`
+	}
+	err := Validate(s{Tags: []string{}})
+	assertValidationError(t, err, "Tags", "required")
+}
+
+func TestValidate_V4_Slice_Required_NonEmpty_Passes(t *testing.T) {
+	type s struct {
+		Tags []string `required:"true"`
+	}
+	if err := Validate(s{Tags: []string{"go", "backend"}}); err != nil {
+		t.Fatalf("expected nil for non-empty required slice, got %v", err)
+	}
+}
+
+func TestValidate_V4_Slice_NoRequiredTag_NilPasses(t *testing.T) {
+	// Without required, a nil slice must pass without error.
+	type s struct {
+		Tags []string
+	}
+	if err := Validate(s{Tags: nil}); err != nil {
+		t.Fatalf("expected nil for nil slice without required tag, got %v", err)
+	}
+}
+
+func TestValidate_V4_Slice_OfStructs_Valid(t *testing.T) {
+	type s struct {
+		Tags []v4Tag
+	}
+	st := s{Tags: []v4Tag{
+		{Label: "speed", Value: "high"},
+		{Label: "cost", Value: "low"},
+	}}
+	if err := Validate(st); err != nil {
+		t.Fatalf("expected nil for valid slice of structs, got %v", err)
+	}
+}
+
+func TestValidate_V4_Slice_OfStructs_InvalidElement(t *testing.T) {
+	// Tags[1].Label is empty — required:"true" must fail with qualified path.
+	type s struct {
+		Tags []v4Tag
+	}
+	st := s{Tags: []v4Tag{
+		{Label: "speed", Value: "high"},
+		{Label: "", Value: "low"}, // invalid
+	}}
+	err := Validate(st)
+	assertValidationError(t, err, "Tags[1].Label", "required")
+}
+
+func TestValidate_V4_Slice_OfStructs_InvalidElement_OneOf(t *testing.T) {
+	// Tags[0].Value is not in the oneOf list.
+	type s struct {
+		Tags []v4Tag
+	}
+	st := s{Tags: []v4Tag{
+		{Label: "speed", Value: "ultra"}, // invalid Value
+	}}
+	err := Validate(st)
+	assertValidationError(t, err, "Tags[0].Value", "oneOf")
+}
+
+func TestValidate_V4_Slice_OfPointerToStruct_NilElementSkipped(t *testing.T) {
+	// A nil pointer element inside a slice must not panic; it must be skipped.
+	type inner struct {
+		Name string `required:"true"`
+	}
+	type s struct {
+		Items []*inner
+	}
+	st := s{Items: []*inner{nil, {Name: "ok"}}}
+	if err := Validate(st); err != nil {
+		t.Fatalf("nil pointer element in slice must be skipped, got %v", err)
+	}
+}
+
+func TestValidate_V4_Slice_OfPointerToStruct_InvalidInner(t *testing.T) {
+	type inner struct {
+		Name string `required:"true"`
+	}
+	type s struct {
+		Items []*inner
+	}
+	st := s{Items: []*inner{{Name: "ok"}, {Name: ""}}}
+	err := Validate(st)
+	assertValidationError(t, err, "Items[1].Name", "required")
+}
+
+// ── Map validation ─────────────────────────────────────────────────────────────
+
+func TestValidate_V4_Map_Required_NilFails(t *testing.T) {
+	type s struct {
+		Meta map[string]string `required:"true"`
+	}
+	err := Validate(s{Meta: nil})
+	assertValidationError(t, err, "Meta", "required")
+}
+
+func TestValidate_V4_Map_Required_EmptyFails(t *testing.T) {
+	type s struct {
+		Meta map[string]string `required:"true"`
+	}
+	err := Validate(s{Meta: map[string]string{}})
+	assertValidationError(t, err, "Meta", "required")
+}
+
+func TestValidate_V4_Map_Required_NonEmpty_Passes(t *testing.T) {
+	type s struct {
+		Meta map[string]string `required:"true"`
+	}
+	if err := Validate(s{Meta: map[string]string{"env": "prod"}}); err != nil {
+		t.Fatalf("expected nil for non-empty required map, got %v", err)
+	}
+}
+
+func TestValidate_V4_Map_NoRequiredTag_NilPasses(t *testing.T) {
+	type s struct {
+		Meta map[string]string
+	}
+	if err := Validate(s{Meta: nil}); err != nil {
+		t.Fatalf("expected nil for nil map without required tag, got %v", err)
+	}
+}
+
+func TestValidate_V4_Map_OfStructValues_Valid(t *testing.T) {
+	type inner struct {
+		Name string `required:"true"`
+	}
+	type s struct {
+		Registry map[string]inner
+	}
+	st := s{Registry: map[string]inner{
+		"alpha": {Name: "Alpha Service"},
+		"beta":  {Name: "Beta Service"},
+	}}
+	if err := Validate(st); err != nil {
+		t.Fatalf("expected nil for valid map of structs, got %v", err)
+	}
+}
+
+func TestValidate_V4_Map_OfStructValues_InvalidValue(t *testing.T) {
+	// One map value has an empty required field — must return a qualified error.
+	type inner struct {
+		Name string `required:"true"`
+	}
+	type s struct {
+		Registry map[string]inner
+	}
+	st := s{Registry: map[string]inner{
+		"alpha": {Name: ""},
+	}}
+	err := Validate(st)
+	if err == nil {
+		t.Fatal("expected ValidationError for invalid map struct value, got nil")
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("expected *ValidationError, got %T: %v", err, err)
+	}
+	// Field must be "Registry[alpha].Name"
+	if ve.Field != "Registry[alpha].Name" {
+		t.Errorf("expected Field %q, got %q", "Registry[alpha].Name", ve.Field)
+	}
+	if ve.Rule != "required" {
+		t.Errorf("expected Rule %q, got %q", "required", ve.Rule)
+	}
+}
+
+func TestValidate_V4_Map_OfPointerToStructValues_NilValueSkipped(t *testing.T) {
+	// nil pointer values inside a map must not panic; they must be skipped.
+	type inner struct {
+		Name string `required:"true"`
+	}
+	type s struct {
+		Registry map[string]*inner
+	}
+	st := s{Registry: map[string]*inner{
+		"alpha": nil,
+		"beta":  {Name: "Beta"},
+	}}
+	if err := Validate(st); err != nil {
+		t.Fatalf("nil pointer map value must be skipped, got %v", err)
+	}
+}
+
+// ── Integration / mixed-nesting tests ─────────────────────────────────────────
+
+func TestValidate_V4_Mixed_AllValid(t *testing.T) {
+	// v4User exercises nested struct, required slice, and required map together.
+	u := v4User{
+		Name:     "Ganesh",
+		Age:      25,
+		Address:  v4Address{City: "Pune", Pincode: "411001"},
+		Skills:   []string{"Go", "Docker"},
+		Metadata: map[string]string{"team": "backend"},
+	}
+	if err := Validate(u); err != nil {
+		t.Fatalf("expected nil for fully valid mixed v4User, got %v", err)
+	}
+}
+
+func TestValidate_V4_Mixed_NestedStructFailsFirst(t *testing.T) {
+	// Address is validated after top-level fields; Skills is validated after
+	// Address. With Address.City empty, we expect the nested error first.
+	u := v4User{
+		Name:     "Ganesh",
+		Age:      25,
+		Address:  v4Address{City: "", Pincode: "411001"}, // invalid
+		Skills:   []string{},                              // also invalid, checked after
+		Metadata: map[string]string{"team": "backend"},
+	}
+	err := Validate(u)
+	assertValidationError(t, err, "Address.City", "required")
+}
+
+func TestValidate_V4_Mixed_SliceFailsAfterNested(t *testing.T) {
+	// Address is valid but Skills is empty (required).
+	u := v4User{
+		Name:     "Ganesh",
+		Age:      25,
+		Address:  v4Address{City: "Pune", Pincode: "411001"},
+		Skills:   nil,                                     // invalid — required
+		Metadata: map[string]string{"team": "backend"},
+	}
+	err := Validate(u)
+	assertValidationError(t, err, "Skills", "required")
+}
+
+func TestValidate_V4_Mixed_MapFailsAfterSlice(t *testing.T) {
+	// Address valid, Skills valid, Metadata empty — Metadata error expected.
+	u := v4User{
+		Name:     "Ganesh",
+		Age:      25,
+		Address:  v4Address{City: "Pune", Pincode: "411001"},
+		Skills:   []string{"Go"},
+		Metadata: map[string]string{}, // invalid — required
+	}
+	err := Validate(u)
+	assertValidationError(t, err, "Metadata", "required")
+}
+
+func TestValidate_V4_Pointer_ToRootStruct_Valid(t *testing.T) {
+	// Validate still accepts *T for the root struct in V4.
+	u := &v4User{
+		Name:     "Ganesh",
+		Age:      25,
+		Address:  v4Address{City: "Pune", Pincode: "411001"},
+		Skills:   []string{"Go"},
+		Metadata: map[string]string{"env": "prod"},
+	}
+	if err := Validate(u); err != nil {
+		t.Fatalf("expected nil for valid *v4User, got %v", err)
+	}
+}
+
+// ── V4 edge-case tests ─────────────────────────────────────────────────────────
+
+func TestValidate_V4_EmptyNestedStruct_NoTags_Passes(t *testing.T) {
+	// A nested struct with no validation tags must never produce an error.
+	type inner struct {
+		Comment string
+	}
+	type outer struct {
+		Name  string `required:"true"`
+		Extra inner
+	}
+	o := outer{Name: "Ganesh", Extra: inner{Comment: ""}}
+	if err := Validate(o); err != nil {
+		t.Fatalf("expected nil for nested struct with no tags, got %v", err)
+	}
+}
+
+func TestValidate_V4_QualifiedName_MultiLevelSliceStruct(t *testing.T) {
+	// Slice of structs, each of which has its own nested struct.
+	type inner struct {
+		Tag   v4Tag
+	}
+	type outer struct {
+		Items []inner
+	}
+	o := outer{Items: []inner{
+		{Tag: v4Tag{Label: "ok", Value: "high"}},
+		{Tag: v4Tag{Label: "", Value: "low"}}, // Items[1].Tag.Label fails required
+	}}
+	err := Validate(o)
+	assertValidationError(t, err, "Items[1].Tag.Label", "required")
+}
+
+func TestValidate_V4_Slice_Array_OfStructs_Valid(t *testing.T) {
+	// [2]v4Tag (fixed-size array) must also be recursed into.
+	type s struct {
+		Tags [2]v4Tag
+	}
+	st := s{Tags: [2]v4Tag{
+		{Label: "a", Value: "low"},
+		{Label: "b", Value: "high"},
+	}}
+	if err := Validate(st); err != nil {
+		t.Fatalf("expected nil for valid fixed-size array of structs, got %v", err)
+	}
+}
+
+func TestValidate_V4_Slice_Array_OfStructs_InvalidElement(t *testing.T) {
+	type s struct {
+		Tags [2]v4Tag
+	}
+	st := s{Tags: [2]v4Tag{
+		{Label: "a", Value: "low"},
+		{Label: "", Value: "high"}, // Tags[1].Label required fails
+	}}
+	err := Validate(st)
+	assertValidationError(t, err, "Tags[1].Label", "required")
+}
+
+func TestValidate_V4_qualifiedName_Helper(t *testing.T) {
+	// Internal helper — verify dot-path construction via the observable Field.
+	type child struct {
+		Val string `required:"true"`
+	}
+	type parent struct {
+		Child child
+	}
+	err := Validate(parent{Child: child{Val: ""}})
+	assertValidationError(t, err, "Child.Val", "required")
+}
+
+func TestValidate_V4_StructField_WithAllV3Tags_InsideNested(t *testing.T) {
+	// Nested struct uses all V3 string tags — ensure rules still fire correctly
+	// even when the struct is accessed through recursive descent.
+	type inner struct {
+		Role  string `oneOf:"admin,user"`
+		Phone string `regex:"^[0-9]{10}$"`
+	}
+	type outer struct {
+		Name  string `required:"true"`
+		Inner inner
+	}
+	// Inner.Role violates oneOf.
+	err := Validate(outer{Name: "Ganesh", Inner: inner{Role: "superadmin", Phone: "9876543210"}})
+	assertValidationError(t, err, "Inner.Role", "oneOf")
+}
+
+func TestValidate_V4_DepthGuard_Triggers(t *testing.T) {
+	// validateStruct must not panic on deeply nested structures; the depth guard
+	// returns a descriptive error instead.
+	// We build a chain 33 levels deep (one beyond maxRecursionDepth=32) using
+	// an interface field to force reflect descent at each level.
+	//
+	// Since Go does not support recursive struct types directly, we use the
+	// public Validate entry-point with a manually-constructed reflect.Value via
+	// a helper type chain generated to exceed the depth limit.
+	//
+	// The simplest safe test: call validateStruct directly at depth > limit.
+	type leaf struct{ X string }
+	v := reflect.ValueOf(leaf{X: "ok"})
+	err := validateStruct(v, "test", maxRecursionDepth+1)
+	if err == nil {
+		t.Fatal("expected error when depth > maxRecursionDepth, got nil")
+	}
+	// Must be a plain error, not a *ValidationError.
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		t.Fatalf("depth guard must return plain error, got *ValidationError: %v", ve)
+	}
 }
