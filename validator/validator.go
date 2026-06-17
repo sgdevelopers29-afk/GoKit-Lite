@@ -2,7 +2,7 @@
 // for Go. It reads validation rules from struct field tags and returns a
 // structured [ValidationError] on the first violated rule.
 //
-// Supported tags (V4):
+// Supported tags (V5):
 //
 //   - required:"true"       — the field must not be its zero value; for slices
 //     and maps this means non-nil and non-empty
@@ -13,33 +13,25 @@
 //   - maxLength:"<n>"       — string field must have at most n Unicode code points
 //   - regex:"<pattern>"     — string field must match the given regular expression
 //   - oneOf:"<a>,<b>,..."   — string field must be one of the comma-separated values
+//   - eqField:"<Field>"     — field value must equal the specified field in the same struct
 //
-// V4 additions — recursive validation:
+// V5 framework additions:
 //
-// Validate automatically descends into nested structs, slices, and maps.
-// Validation errors for nested fields carry a fully-qualified dot-path in
-// [ValidationError.Field], for example "Address.City" or "Skills[0].Name".
+//   - Custom field validators: Register custom rules via [Register].
+//   - Cross-field (struct) validators: Register type-level checks via [RegisterStructValidator].
+//   - Error aggregation: Use [ValidateAll] to collect all failures via [Result].
 //
 // Usage:
 //
-//	type Address struct {
-//	    City string `required:"true"`
-//	}
-//
 //	type User struct {
-//	    Name    string  `required:"true" minLength:"2" maxLength:"50"`
-//	    Age     int     `min:"18" max:"120"`
-//	    Email   string  `required:"true" email:"true"`
-//	    Phone   string  `regex:"^[0-9]{10}$"`
-//	    Role    string  `oneOf:"admin,user,guest"`
-//	    Address Address
-//	    Skills  []string `required:"true"`
+//	    Name            string `required:"true"`
+//	    Password        string `required:"true" minLength:"8"`
+//	    ConfirmPassword string `required:"true" eqField:"Password"`
 //	}
 //
-//	if err := validator.Validate(user); err != nil {
-//	    var ve *validator.ValidationError
-//	    if errors.As(err, &ve) {
-//	        fmt.Println(ve.Field, ve.Rule)
+//	if result := validator.ValidateAll(user); !result.Valid {
+//	    for _, e := range result.Errors {
+//	        fmt.Println(e.Field, e.Message)
 //	    }
 //	}
 package validator
@@ -62,200 +54,333 @@ const maxRecursionDepth = 32
 
 // emailRegexp is the compiled regular expression used for e-mail validation.
 // It follows the most common subset of RFC 5322 that covers real-world addresses.
-// Compiled once at package initialisation to avoid per-call overhead.
 var emailRegexp = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
 
-// regexpCache stores previously compiled *regexp.Regexp instances keyed by
-// pattern string. Using sync.Map means concurrent calls to Validate with the
-// same regex pattern pay the compilation cost only once.
+// regexpCache stores previously compiled *regexp.Regexp instances keyed by pattern string.
 var regexpCache sync.Map
 
-// Validate inspects every exported field of data using struct tags and returns
-// a [*ValidationError] for the first rule violation it finds.
-//
-// data must be a struct or a non-nil pointer to a struct; any other value
-// (including nil) causes an error to be returned immediately.
-//
-// V4: Validate recursively descends into nested structs, slice elements, and
-// map values. [ValidationError.Field] for nested failures carries the full
-// dot-path (e.g. "Address.City").
-//
-// Validation rules are applied in tag-declaration order per field:
-//  1. required
-//  2. min
-//  3. max
-//  4. email
-//  5. minLength
-//  6. maxLength
-//  7. regex
-//  8. oneOf
-//
-// Validate stops and returns on the very first failure (fail-fast). If all
-// fields pass, nil is returned.
-func Validate(data any) error {
+// ── V5 Public Types and Registration ─────────────────────────────────────────
 
+// ValidatorFunc is the signature for custom field-level validators.
+// value is the field's current value. Return true to pass, false to fail.
+type ValidatorFunc func(value any) bool
+
+// StructValidatorFunc is the signature for struct-level (cross-field) validators.
+// s is the complete struct value. Return true to pass, false to fail.
+type StructValidatorFunc func(s any) bool
+
+var (
+	// customValidators holds ValidatorFunc keyed by string tag name.
+	customValidators sync.Map
+	// structValidators holds StructValidatorFunc keyed by reflect.Type.
+	structValidators sync.Map
+)
+
+// reservedTags are built-in tag names that cannot be overwritten by custom validators.
+var reservedTags = map[string]bool{
+	"required":  true,
+	"min":       true,
+	"max":       true,
+	"email":     true,
+	"minLength": true,
+	"maxLength": true,
+	"regex":     true,
+	"oneOf":     true,
+	"eqField":   true,
+}
+
+// Register registers a custom field-level validator under the given tag name.
+// Returns an error if name is empty, name collides with a built-in tag, or fn is nil.
+func Register(name string, fn ValidatorFunc) error {
+	if name == "" {
+		return errors.New("validator: registration name cannot be empty")
+	}
+	if reservedTags[name] {
+		return fmt.Errorf("validator: cannot overwrite reserved built-in tag %q", name)
+	}
+	if fn == nil {
+		return errors.New("validator: validation function cannot be nil")
+	}
+	customValidators.Store(name, fn)
+	return nil
+}
+
+// Unregister removes a previously registered custom field validator.
+// No-op if name was never registered.
+func Unregister(name string) {
+	customValidators.Delete(name)
+}
+
+// RegisterStructValidator registers a struct-level cross-field validator for the given
+// reflect.Type. Returns an error if t is nil, not a struct, or fn is nil.
+func RegisterStructValidator(t reflect.Type, fn StructValidatorFunc) error {
+	if t == nil {
+		return errors.New("validator: type cannot be nil")
+	}
+	if t.Kind() != reflect.Struct {
+		return fmt.Errorf("validator: struct validator must be registered for a struct type, got %v", t.Kind())
+	}
+	if fn == nil {
+		return errors.New("validator: struct validation function cannot be nil")
+	}
+	structValidators.Store(t, fn)
+	return nil
+}
+
+// UnregisterStructValidator removes a previously registered struct validator.
+func UnregisterStructValidator(t reflect.Type) {
+	structValidators.Delete(t)
+}
+
+// ── Validation Entrypoints ────────────────────────────────────────────────────
+
+// Validate inspects every exported field of data using struct tags and returns
+// an error for the first rule violation it finds (fail-fast).
+//
+// data must be a struct or a non-nil pointer to a struct.
+func Validate(data any) error {
+	v, err := prepareValue(data)
+	if err != nil {
+		return err
+	}
+
+	errs, err := collectErrors(v, "", 0, true)
+	if err != nil {
+		return err // Programming errors
+	}
+	if len(errs) > 0 {
+		ve := errs[0]
+		return &ve
+	}
+	return nil
+}
+
+// ValidateAll inspects every exported field of data using struct tags and returns
+// a [*Result] containing all validation errors found.
+// Within a single field, only the first failing rule is collected (per-field fail-fast).
+// Across fields, all failures are collected.
+func ValidateAll(data any) *Result {
+	res := &Result{Valid: true}
+	v, err := prepareValue(data)
+	if err != nil {
+		res.Valid = false
+		res.Errors = append(res.Errors, ValidationError{
+			Field:   "",
+			Rule:    "input",
+			Message: err.Error(),
+		})
+		return res
+	}
+
+	errs, sysErr := collectErrors(v, "", 0, false)
+	if sysErr != nil {
+		res.Valid = false
+		res.Errors = append(res.Errors, ValidationError{
+			Field:   "",
+			Rule:    "system",
+			Message: sysErr.Error(),
+		})
+		return res
+	}
+
+	if len(errs) > 0 {
+		res.Valid = false
+		res.Errors = errs
+	}
+
+	return res
+}
+
+func prepareValue(data any) (reflect.Value, error) {
 	if data == nil {
-		return errors.New("validator: input cannot be nil")
+		return reflect.Value{}, errors.New("validator: input cannot be nil")
 	}
 
 	v := reflect.ValueOf(data)
-
-	// Dereference a pointer exactly one level so callers can pass either T or *T.
 	if v.Kind() == reflect.Ptr {
 		if v.IsNil() {
-			return errors.New("validator: input cannot be nil")
+			return reflect.Value{}, errors.New("validator: input cannot be nil")
 		}
 		v = v.Elem()
 	}
 
 	if v.Kind() != reflect.Struct {
-		return fmt.Errorf("validator: input must be a struct, got %s", v.Kind())
+		return reflect.Value{}, fmt.Errorf("validator: input must be a struct, got %s", v.Kind())
 	}
 
-	return validateStruct(v, "", 0)
+	return v, nil
 }
 
 // ── Recursive engine ──────────────────────────────────────────────────────────
 
-// validateStruct iterates over every exported field of the struct held in v,
-// applies all configured tag rules, and recursively descends into nested
-// structs, slices, and maps.
-//
-// prefix is the dot-path of the parent field (empty string for the root
-// struct). It is prepended to each field name when constructing
-// [ValidationError.Field] so that callers always receive a fully-qualified
-// path (e.g. "Address.City").
-//
-// depth is the current recursion level. If it exceeds [maxRecursionDepth] an
-// error is returned immediately to prevent runaway recursion.
-func validateStruct(v reflect.Value, prefix string, depth int) error {
+func collectErrors(v reflect.Value, prefix string, depth int, failFast bool) ([]ValidationError, error) {
 	if depth > maxRecursionDepth {
-		return fmt.Errorf("validator: maximum recursion depth (%d) exceeded at %q — possible circular reference",
+		return nil, fmt.Errorf("validator: maximum recursion depth (%d) exceeded at %q — possible circular reference",
 			maxRecursionDepth, prefix)
 	}
 
+	var allErrs []ValidationError
 	t := v.Type()
 
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
 		fieldVal := v.Field(i)
 
-		// Skip unexported fields — reflect cannot reliably read their values
-		// and tag-based validation on unexported fields is a misuse of the API.
 		if !field.IsExported() {
 			continue
 		}
 
-		// Build the fully-qualified field name used in ValidationError.Field.
 		qualName := qualifiedName(prefix, field.Name)
 
-		// ── Apply all scalar tag rules ────────────────────────────────────
-		if err := applyRequired(field, fieldVal, qualName); err != nil {
-			return err
+		// Apply field-level rules
+		ve, sysErr := applyFieldRules(field, fieldVal, qualName, v)
+		if sysErr != nil {
+			return nil, sysErr
 		}
-		if err := applyMin(field, fieldVal, qualName); err != nil {
-			return err
-		}
-		if err := applyMax(field, fieldVal, qualName); err != nil {
-			return err
-		}
-		if err := applyEmail(field, fieldVal, qualName); err != nil {
-			return err
-		}
-		if err := applyMinLength(field, fieldVal, qualName); err != nil {
-			return err
-		}
-		if err := applyMaxLength(field, fieldVal, qualName); err != nil {
-			return err
-		}
-		if err := applyRegex(field, fieldVal, qualName); err != nil {
-			return err
-		}
-		if err := applyOneOf(field, fieldVal, qualName); err != nil {
-			return err
+		if ve != nil {
+			allErrs = append(allErrs, *ve)
+			if failFast {
+				return allErrs, nil
+			}
+			// Skip descending into children of this field if the field itself is invalid
+			continue
 		}
 
-		// ── Recursive descent ─────────────────────────────────────────────
-		// Dereference a pointer field before inspecting its kind.
+		// Recursive descent
 		descVal := fieldVal
 		if descVal.Kind() == reflect.Ptr {
 			if descVal.IsNil() {
-				// nil pointer — required was already checked above; skip descent.
 				continue
 			}
 			descVal = descVal.Elem()
 		}
 
+		var nestedErrs []ValidationError
+		var err error
+
 		switch descVal.Kind() {
 		case reflect.Struct:
-			// Recurse into the nested struct using the current field name as the
-			// new prefix so that child errors carry "Parent.Child" paths.
-			if err := validateStruct(descVal, qualName, depth+1); err != nil {
-				return err
-			}
-
+			nestedErrs, err = collectErrors(descVal, qualName, depth+1, failFast)
 		case reflect.Slice, reflect.Array:
-			if err := validateSliceField(descVal, qualName, depth); err != nil {
-				return err
-			}
-
+			nestedErrs, err = collectSliceErrors(descVal, qualName, depth, failFast)
 		case reflect.Map:
-			if err := validateMapField(descVal, qualName, depth); err != nil {
-				return err
+			nestedErrs, err = collectMapErrors(descVal, qualName, depth, failFast)
+		}
+
+		if err != nil {
+			return nil, err
+		}
+		if len(nestedErrs) > 0 {
+			allErrs = append(allErrs, nestedErrs...)
+			if failFast {
+				return allErrs, nil
 			}
 		}
 	}
 
-	return nil
+	// Apply struct-level validators for this struct
+	if fnv, ok := structValidators.Load(t); ok {
+		fn := fnv.(StructValidatorFunc)
+		if !fn(v.Interface()) {
+			structQualName := prefix
+			if structQualName == "" {
+				structQualName = t.Name()
+			}
+			ve := ValidationError{
+				Field:   structQualName,
+				Rule:    "struct",
+				Message: fmt.Sprintf("struct validation failed for %s", structQualName),
+			}
+			allErrs = append(allErrs, ve)
+			if failFast {
+				return allErrs, nil
+			}
+		}
+	}
+
+	return allErrs, nil
 }
 
-// validateSliceField iterates over the elements of a slice or array and
-// recursively validates any elements that are structs (or pointers to structs).
-//
-// Elements of scalar types (string, int, …) have no field-level tags of their
-// own, so they are silently skipped from rule evaluation; they only participate
-// in validation if they are structs.
-//
-// prefix is the qualified name of the slice field itself (e.g. "Skills").
-// Element paths are formatted as "Skills[0]", "Skills[1]", etc.
-func validateSliceField(v reflect.Value, prefix string, depth int) error {
+func applyFieldRules(field reflect.StructField, val reflect.Value, qualName string, parentStruct reflect.Value) (*ValidationError, error) {
+	if err := applyRequired(field, val, qualName); err != nil {
+		return extractError(err)
+	}
+	if err := applyMin(field, val, qualName); err != nil {
+		return extractError(err)
+	}
+	if err := applyMax(field, val, qualName); err != nil {
+		return extractError(err)
+	}
+	if err := applyEmail(field, val, qualName); err != nil {
+		return extractError(err)
+	}
+	if err := applyMinLength(field, val, qualName); err != nil {
+		return extractError(err)
+	}
+	if err := applyMaxLength(field, val, qualName); err != nil {
+		return extractError(err)
+	}
+	if err := applyRegex(field, val, qualName); err != nil {
+		return extractError(err)
+	}
+	if err := applyOneOf(field, val, qualName); err != nil {
+		return extractError(err)
+	}
+	if err := applyEqField(field, val, qualName, parentStruct); err != nil {
+		return extractError(err)
+	}
+	if err := applyCustomValidators(field, val, qualName); err != nil {
+		return extractError(err)
+	}
+	return nil, nil
+}
+
+func extractError(err error) (*ValidationError, error) {
+	if err == nil {
+		return nil, nil
+	}
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		return ve, nil
+	}
+	return nil, err // System/programming error
+}
+
+func collectSliceErrors(v reflect.Value, prefix string, depth int, failFast bool) ([]ValidationError, error) {
+	var allErrs []ValidationError
 	for i := 0; i < v.Len(); i++ {
 		elem := v.Index(i)
 		elemPrefix := fmt.Sprintf("%s[%d]", prefix, i)
 
-		// Dereference pointer elements before inspecting kind.
 		if elem.Kind() == reflect.Ptr {
 			if elem.IsNil() {
-				// nil pointer element — skip gracefully.
 				continue
 			}
 			elem = elem.Elem()
 		}
 
 		if elem.Kind() == reflect.Struct {
-			if err := validateStruct(elem, elemPrefix, depth+1); err != nil {
-				return err
+			errs, err := collectErrors(elem, elemPrefix, depth+1, failFast)
+			if err != nil {
+				return nil, err
+			}
+			if len(errs) > 0 {
+				allErrs = append(allErrs, errs...)
+				if failFast {
+					return allErrs, nil
+				}
 			}
 		}
 	}
-	return nil
+	return allErrs, nil
 }
 
-// validateMapField iterates over the values of a map and recursively validates
-// any values that are structs (or pointers to structs).
-//
-// prefix is the qualified name of the map field itself (e.g. "Metadata").
-// Value paths are formatted as "Metadata[key]".
-//
-// Map iteration order in Go is intentionally random; the first error found in
-// any iteration is returned (fail-fast), but which key is reported may vary
-// between runs for maps with multiple invalid values.
-func validateMapField(v reflect.Value, prefix string, depth int) error {
+func collectMapErrors(v reflect.Value, prefix string, depth int, failFast bool) ([]ValidationError, error) {
+	var allErrs []ValidationError
 	for _, key := range v.MapKeys() {
 		val := v.MapIndex(key)
 		valPrefix := fmt.Sprintf("%s[%v]", prefix, key)
 
-		// MapIndex returns an interface-wrapped value; obtain the concrete value.
 		if val.Kind() == reflect.Interface {
 			if val.IsNil() {
 				continue
@@ -263,7 +388,6 @@ func validateMapField(v reflect.Value, prefix string, depth int) error {
 			val = val.Elem()
 		}
 
-		// Dereference pointer values.
 		if val.Kind() == reflect.Ptr {
 			if val.IsNil() {
 				continue
@@ -272,19 +396,21 @@ func validateMapField(v reflect.Value, prefix string, depth int) error {
 		}
 
 		if val.Kind() == reflect.Struct {
-			if err := validateStruct(val, valPrefix, depth+1); err != nil {
-				return err
+			errs, err := collectErrors(val, valPrefix, depth+1, failFast)
+			if err != nil {
+				return nil, err
+			}
+			if len(errs) > 0 {
+				allErrs = append(allErrs, errs...)
+				if failFast {
+					return allErrs, nil
+				}
 			}
 		}
 	}
-	return nil
+	return allErrs, nil
 }
 
-// qualifiedName builds a dot-separated field path from a parent prefix and a
-// child field name.
-//
-//	qualifiedName("", "Name")        → "Name"
-//	qualifiedName("Address", "City") → "Address.City"
 func qualifiedName(prefix, name string) string {
 	if prefix == "" {
 		return name
@@ -294,11 +420,6 @@ func qualifiedName(prefix, name string) string {
 
 // ── Rule implementations ──────────────────────────────────────────────────────
 
-// applyRequired returns a ValidationError when the field carries
-// `required:"true"` and its current value is the zero value for its type.
-//
-// For slices and maps, "zero value" means nil or empty (len == 0).
-// The qualName parameter is the fully-qualified field path used in the error.
 func applyRequired(field reflect.StructField, val reflect.Value, qualName string) error {
 	if field.Tag.Get("required") != "true" {
 		return nil
@@ -313,14 +434,6 @@ func applyRequired(field reflect.StructField, val reflect.Value, qualName string
 	return nil
 }
 
-// applyMin returns a ValidationError when the field carries a `min:"<n>"` tag
-// and the field's numeric value is strictly less than n.
-//
-// The tag is only evaluated on signed integer, unsigned integer, and
-// floating-point kinds. For any other kind the tag is silently ignored so that
-// adding min to a non-numeric field does not panic.
-//
-// The qualName parameter is the fully-qualified field path used in the error.
 func applyMin(field reflect.StructField, val reflect.Value, qualName string) error {
 	tag := field.Tag.Get("min")
 	if tag == "" {
@@ -329,7 +442,6 @@ func applyMin(field reflect.StructField, val reflect.Value, qualName string) err
 
 	limit, err := strconv.Atoi(tag)
 	if err != nil {
-		// Malformed tag — surface a clear error rather than silently ignoring it.
 		return fmt.Errorf(
 			"validator: field %s has an invalid min tag value %q (must be an integer): %w",
 			qualName, tag, err,
@@ -345,10 +457,8 @@ func applyMin(field reflect.StructField, val reflect.Value, qualName string) err
 				fmt.Sprintf("field %s must be >= %d, got %d", qualName, limit, val.Int()),
 			)
 		}
-
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		if limit < 0 {
-			// A negative min on an unsigned field can never be violated.
 			return nil
 		}
 		if val.Uint() < uint64(limit) {
@@ -358,7 +468,6 @@ func applyMin(field reflect.StructField, val reflect.Value, qualName string) err
 				fmt.Sprintf("field %s must be >= %d, got %d", qualName, limit, val.Uint()),
 			)
 		}
-
 	case reflect.Float32, reflect.Float64:
 		if val.Float() < float64(limit) {
 			return newValidationError(
@@ -367,18 +476,10 @@ func applyMin(field reflect.StructField, val reflect.Value, qualName string) err
 				fmt.Sprintf("field %s must be >= %d, got %g", qualName, limit, val.Float()),
 			)
 		}
-
-	// For all other kinds (string, bool, slice, …) the min tag is a no-op.
 	}
-
 	return nil
 }
 
-// applyMax returns a ValidationError when the field carries a `max:"<n>"` tag
-// and the field's numeric value is strictly greater than n.
-//
-// The same kind-guarding logic as applyMin applies.
-// The qualName parameter is the fully-qualified field path used in the error.
 func applyMax(field reflect.StructField, val reflect.Value, qualName string) error {
 	tag := field.Tag.Get("max")
 	if tag == "" {
@@ -402,10 +503,8 @@ func applyMax(field reflect.StructField, val reflect.Value, qualName string) err
 				fmt.Sprintf("field %s must be <= %d, got %d", qualName, limit, val.Int()),
 			)
 		}
-
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		if limit < 0 {
-			// Any unsigned value violates a negative max.
 			if val.Uint() > 0 || uint64(0) > uint64(limit) {
 				return newValidationError(
 					qualName,
@@ -420,7 +519,6 @@ func applyMax(field reflect.StructField, val reflect.Value, qualName string) err
 				fmt.Sprintf("field %s must be <= %d, got %d", qualName, limit, val.Uint()),
 			)
 		}
-
 	case reflect.Float32, reflect.Float64:
 		if val.Float() > float64(limit) {
 			return newValidationError(
@@ -430,22 +528,14 @@ func applyMax(field reflect.StructField, val reflect.Value, qualName string) err
 			)
 		}
 	}
-
 	return nil
 }
 
-// applyEmail returns a ValidationError when the field carries `email:"true"`
-// and the field's string value does not match a valid e-mail format.
-//
-// The tag is only evaluated on string kinds. For any other kind the tag is
-// silently ignored.
-// The qualName parameter is the fully-qualified field path used in the error.
 func applyEmail(field reflect.StructField, val reflect.Value, qualName string) error {
 	if field.Tag.Get("email") != "true" {
 		return nil
 	}
 	if val.Kind() != reflect.String {
-		// email:"true" on a non-string field is a programming error; surface it.
 		return fmt.Errorf(
 			"validator: email tag is only valid on string fields, field %s is %s",
 			qualName, val.Kind(),
@@ -461,14 +551,6 @@ func applyEmail(field reflect.StructField, val reflect.Value, qualName string) e
 	return nil
 }
 
-// applyMinLength returns a ValidationError when the field carries a
-// `minLength:"<n>"` tag and the string's Unicode code-point count is strictly
-// less than n.
-//
-// Length is measured with [utf8.RuneCountInString] so that multibyte characters
-// (e.g. emoji, CJK) count as one unit, matching user-visible length.
-// The tag is only evaluated on string kinds; for all other kinds it is a no-op.
-// The qualName parameter is the fully-qualified field path used in the error.
 func applyMinLength(field reflect.StructField, val reflect.Value, qualName string) error {
 	tag := field.Tag.Get("minLength")
 	if tag == "" {
@@ -490,8 +572,6 @@ func applyMinLength(field reflect.StructField, val reflect.Value, qualName strin
 	}
 
 	if val.Kind() != reflect.String {
-		// minLength on a non-string field is silently ignored — numeric types
-		// use min instead.
 		return nil
 	}
 
@@ -506,12 +586,6 @@ func applyMinLength(field reflect.StructField, val reflect.Value, qualName strin
 	return nil
 }
 
-// applyMaxLength returns a ValidationError when the field carries a
-// `maxLength:"<n>"` tag and the string's Unicode code-point count is strictly
-// greater than n.
-//
-// The same utf8.RuneCountInString semantics as applyMinLength apply.
-// The qualName parameter is the fully-qualified field path used in the error.
 func applyMaxLength(field reflect.StructField, val reflect.Value, qualName string) error {
 	tag := field.Tag.Get("maxLength")
 	if tag == "" {
@@ -547,19 +621,6 @@ func applyMaxLength(field reflect.StructField, val reflect.Value, qualName strin
 	return nil
 }
 
-// applyRegex returns a ValidationError when the field carries a
-// `regex:"<pattern>"` tag and the field's string value does not match the
-// pattern.
-//
-// Compiled patterns are cached in a package-level [sync.Map] so each unique
-// pattern string is compiled at most once, regardless of how many times
-// Validate is called concurrently.
-//
-// A malformed pattern (one that fails [regexp.Compile]) surfaces a wrapped
-// error rather than panicking, so library users get a clear diagnostic.
-//
-// The tag is only evaluated on string kinds; other kinds are silently skipped.
-// The qualName parameter is the fully-qualified field path used in the error.
 func applyRegex(field reflect.StructField, val reflect.Value, qualName string) error {
 	pattern := field.Tag.Get("regex")
 	if pattern == "" {
@@ -570,7 +631,6 @@ func applyRegex(field reflect.StructField, val reflect.Value, qualName string) e
 		return nil
 	}
 
-	// Look up the compiled regexp in the cache; compile and store if absent.
 	var re *regexp.Regexp
 	if cached, ok := regexpCache.Load(pattern); ok {
 		re = cached.(*regexp.Regexp)
@@ -582,8 +642,6 @@ func applyRegex(field reflect.StructField, val reflect.Value, qualName string) e
 				qualName, pattern, err,
 			)
 		}
-		// Store may race with another goroutine, but both values are equivalent
-		// compiled regexps for the same pattern — the last writer wins harmlessly.
 		regexpCache.Store(pattern, compiled)
 		re = compiled
 	}
@@ -598,18 +656,6 @@ func applyRegex(field reflect.StructField, val reflect.Value, qualName string) e
 	return nil
 }
 
-// applyOneOf returns a ValidationError when the field carries a
-// `oneOf:"<a>,<b>,..."` tag and the field's string value is not one of the
-// comma-separated allowed values.
-//
-// Matching is exact and case-sensitive. Leading/trailing whitespace in tag
-// values is trimmed so that `oneOf:"admin, user, guest"` works as expected.
-//
-// An empty tag value (`oneOf:""`) is treated as a single allowed value: the
-// empty string — consistent with how [strings.Split] behaves.
-//
-// The tag is only evaluated on string kinds; other kinds are silently skipped.
-// The qualName parameter is the fully-qualified field path used in the error.
 func applyOneOf(field reflect.StructField, val reflect.Value, qualName string) error {
 	tag := field.Tag.Get("oneOf")
 	if tag == "" {
@@ -636,49 +682,68 @@ func applyOneOf(field reflect.StructField, val reflect.Value, qualName string) e
 	)
 }
 
+func applyEqField(field reflect.StructField, val reflect.Value, qualName string, parentStruct reflect.Value) error {
+	targetFieldName := field.Tag.Get("eqField")
+	if targetFieldName == "" {
+		return nil
+	}
+
+	targetField := parentStruct.FieldByName(targetFieldName)
+	if !targetField.IsValid() {
+		return fmt.Errorf("validator: eqField tag on %s points to non-existent field %q", qualName, targetFieldName)
+	}
+
+	if !reflect.DeepEqual(val.Interface(), targetField.Interface()) {
+		return newValidationError(
+			qualName,
+			"eqField",
+			fmt.Sprintf("field %s must be equal to field %s", qualName, targetFieldName),
+		)
+	}
+
+	return nil
+}
+
+func applyCustomValidators(field reflect.StructField, val reflect.Value, qualName string) error {
+	var firstErr error
+	customValidators.Range(func(key, value any) bool {
+		tagName := key.(string)
+		tagVal := field.Tag.Get(tagName)
+		if tagVal == "true" { // only activate if value is "true"
+			fn := value.(ValidatorFunc)
+			if !fn(val.Interface()) {
+				firstErr = newValidationError(
+					qualName,
+					tagName,
+					fmt.Sprintf("field %s failed custom validation %q", qualName, tagName),
+				)
+				return false // stop range iteration and return this error
+			}
+		}
+		return true
+	})
+	return firstErr
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 // isZeroValue reports whether v holds the zero value for its type.
-// This is used by the required rule.
-//
-// For slices, arrays, and maps, a zero value means nil or zero length.
-// For pointers and interfaces, a zero value means nil.
 func isZeroValue(v reflect.Value) bool {
 	switch v.Kind() {
-
 	case reflect.String:
 		return v.String() == ""
-
-	case reflect.Int,
-		reflect.Int8,
-		reflect.Int16,
-		reflect.Int32,
-		reflect.Int64:
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return v.Int() == 0
-
-	case reflect.Uint,
-		reflect.Uint8,
-		reflect.Uint16,
-		reflect.Uint32,
-		reflect.Uint64:
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		return v.Uint() == 0
-
 	case reflect.Bool:
 		return !v.Bool()
-
-	case reflect.Float32,
-		reflect.Float64:
+	case reflect.Float32, reflect.Float64:
 		return v.Float() == 0
-
-	case reflect.Slice,
-		reflect.Array,
-		reflect.Map:
+	case reflect.Slice, reflect.Array, reflect.Map:
 		return v.Len() == 0
-
-	case reflect.Ptr,
-		reflect.Interface:
+	case reflect.Ptr, reflect.Interface:
 		return v.IsNil()
-
 	default:
 		return v.IsZero()
 	}

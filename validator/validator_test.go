@@ -3,6 +3,7 @@ package validator
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -1317,7 +1318,7 @@ func TestValidate_V4_DepthGuard_Triggers(t *testing.T) {
 	// The simplest safe test: call validateStruct directly at depth > limit.
 	type leaf struct{ X string }
 	v := reflect.ValueOf(leaf{X: "ok"})
-	err := validateStruct(v, "test", maxRecursionDepth+1)
+	_, err := collectErrors(v, "test", maxRecursionDepth+1, true)
 	if err == nil {
 		t.Fatal("expected error when depth > maxRecursionDepth, got nil")
 	}
@@ -1325,5 +1326,309 @@ func TestValidate_V4_DepthGuard_Triggers(t *testing.T) {
 	var ve *ValidationError
 	if errors.As(err, &ve) {
 		t.Fatalf("depth guard must return plain error, got *ValidationError: %v", ve)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Validator V5 tests — Custom Validators, Struct Validators, eqField, Aggregation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Custom Field Validators ───────────────────────────────────────────────────
+
+func TestRegister_CustomValidator_Valid(t *testing.T) {
+	err := Register("is_even", func(v any) bool {
+		i, ok := v.(int)
+		return ok && i%2 == 0
+	})
+	if err != nil {
+		t.Fatalf("expected nil error on valid Register, got %v", err)
+	}
+	defer Unregister("is_even")
+
+	type s struct {
+		Val int `is_even:"true"`
+	}
+
+	if err := Validate(s{Val: 4}); err != nil {
+		t.Errorf("expected nil for valid custom validator, got %v", err)
+	}
+
+	err = Validate(s{Val: 5})
+	assertValidationError(t, err, "Val", "is_even")
+}
+
+func TestRegister_EmptyName_Error(t *testing.T) {
+	err := Register("", func(any) bool { return true })
+	if err == nil {
+		t.Fatal("expected error when registering with empty name")
+	}
+}
+
+func TestRegister_NilFunc_Error(t *testing.T) {
+	err := Register("nil_func", nil)
+	if err == nil {
+		t.Fatal("expected error when registering with nil function")
+	}
+}
+
+func TestRegister_ReservedTag_Error(t *testing.T) {
+	err := Register("required", func(any) bool { return true })
+	if err == nil {
+		t.Fatal("expected error when overwriting reserved tag")
+	}
+}
+
+func TestApplyCustomValidator_WrongValue_Ignored(t *testing.T) {
+	// Only tag value "true" activates the custom validator
+	Register("dummy", func(any) bool { return false })
+	defer Unregister("dummy")
+
+	type s struct {
+		Val int `dummy:"false"`
+	}
+
+	if err := Validate(s{Val: 1}); err != nil {
+		t.Fatalf("expected nil when custom tag value is not 'true', got %v", err)
+	}
+}
+
+// ── Struct-Level Validators ───────────────────────────────────────────────────
+
+func TestRegisterStructValidator_Valid(t *testing.T) {
+	type rangeStruct struct {
+		Min int
+		Max int
+	}
+	rt := reflect.TypeOf(rangeStruct{})
+
+	err := RegisterStructValidator(rt, func(s any) bool {
+		r, ok := s.(rangeStruct)
+		return ok && r.Min <= r.Max
+	})
+	if err != nil {
+		t.Fatalf("expected nil error on valid RegisterStructValidator, got %v", err)
+	}
+	defer UnregisterStructValidator(rt)
+
+	if err := Validate(rangeStruct{Min: 1, Max: 5}); err != nil {
+		t.Errorf("expected nil for valid struct validator, got %v", err)
+	}
+
+	err = Validate(rangeStruct{Min: 5, Max: 1})
+	assertValidationError(t, err, "rangeStruct", "struct")
+}
+
+func TestRegisterStructValidator_NilType_Error(t *testing.T) {
+	err := RegisterStructValidator(nil, func(any) bool { return true })
+	if err == nil {
+		t.Fatal("expected error when registering nil type")
+	}
+}
+
+func TestRegisterStructValidator_NonStructType_Error(t *testing.T) {
+	rt := reflect.TypeOf(42) // int type
+	err := RegisterStructValidator(rt, func(any) bool { return true })
+	if err == nil {
+		t.Fatal("expected error when registering non-struct type")
+	}
+}
+
+func TestRegisterStructValidator_NilFunc_Error(t *testing.T) {
+	rt := reflect.TypeOf(struct{}{})
+	err := RegisterStructValidator(rt, nil)
+	if err == nil {
+		t.Fatal("expected error when registering nil func")
+	}
+}
+
+func TestRegisterStructValidator_NestedStruct(t *testing.T) {
+	type inner struct {
+		A int
+		B int
+	}
+	type outer struct {
+		Nested inner
+	}
+
+	rt := reflect.TypeOf(inner{})
+	RegisterStructValidator(rt, func(s any) bool {
+		in, ok := s.(inner)
+		return ok && in.A == in.B
+	})
+	defer UnregisterStructValidator(rt)
+
+	// Valid
+	if err := Validate(outer{Nested: inner{A: 1, B: 1}}); err != nil {
+		t.Errorf("expected nil for valid nested struct validator, got %v", err)
+	}
+
+	// Invalid
+	err := Validate(outer{Nested: inner{A: 1, B: 2}})
+	assertValidationError(t, err, "Nested", "struct")
+}
+
+// ── eqField tag ───────────────────────────────────────────────────────────────
+
+func TestValidate_EqField_Valid(t *testing.T) {
+	type s struct {
+		P1 string
+		P2 string `eqField:"P1"`
+	}
+	if err := Validate(s{P1: "pass", P2: "pass"}); err != nil {
+		t.Fatalf("expected nil for equal fields, got %v", err)
+	}
+}
+
+func TestValidate_EqField_Invalid(t *testing.T) {
+	type s struct {
+		P1 string
+		P2 string `eqField:"P1"`
+	}
+	err := Validate(s{P1: "pass", P2: "fail"})
+	assertValidationError(t, err, "P2", "eqField")
+}
+
+func TestValidate_EqField_NonStringTypes(t *testing.T) {
+	type s struct {
+		A int
+		B int `eqField:"A"`
+	}
+	if err := Validate(s{A: 42, B: 42}); err != nil {
+		t.Fatalf("expected nil for equal int fields, got %v", err)
+	}
+	err := Validate(s{A: 42, B: 100})
+	assertValidationError(t, err, "B", "eqField")
+}
+
+func TestValidate_EqField_MissingTarget_ReturnsError(t *testing.T) {
+	type s struct {
+		A string `eqField:"NonExistent"`
+	}
+	err := Validate(s{A: "test"})
+	if err == nil {
+		t.Fatal("expected error for missing target field")
+	}
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		t.Fatalf("expected plain error, got *ValidationError: %v", ve)
+	}
+}
+
+// ── ValidateAll Error Aggregation ─────────────────────────────────────────────
+
+func TestValidateAll_Valid(t *testing.T) {
+	type s struct {
+		A string `required:"true"`
+	}
+	res := ValidateAll(s{A: "ok"})
+	if !res.Valid {
+		t.Errorf("expected Valid=true, got false")
+	}
+	if len(res.Errors) != 0 {
+		t.Errorf("expected 0 errors, got %d", len(res.Errors))
+	}
+	if res.First() != nil {
+		t.Errorf("expected First() to return nil, got %v", res.First())
+	}
+	if res.Error() != "validator: valid" {
+		t.Errorf("expected 'validator: valid', got %q", res.Error())
+	}
+}
+
+func TestValidateAll_MultipleErrors(t *testing.T) {
+	type s struct {
+		A string `required:"true"`
+		B int    `min:"10"`
+		C string `email:"true"`
+	}
+	res := ValidateAll(s{A: "", B: 5, C: "bad"})
+	if res.Valid {
+		t.Fatal("expected Valid=false")
+	}
+	if len(res.Errors) != 3 {
+		t.Fatalf("expected 3 errors, got %d", len(res.Errors))
+	}
+
+	// Order is guaranteed by struct definition
+	if res.Errors[0].Field != "A" || res.Errors[0].Rule != "required" {
+		t.Errorf("error 0 mismatch: %+v", res.Errors[0])
+	}
+	if res.Errors[1].Field != "B" || res.Errors[1].Rule != "min" {
+		t.Errorf("error 1 mismatch: %+v", res.Errors[1])
+	}
+	if res.Errors[2].Field != "C" || res.Errors[2].Rule != "email" {
+		t.Errorf("error 2 mismatch: %+v", res.Errors[2])
+	}
+
+	// First()
+	first := res.First()
+	if first == nil || first.Field != "A" {
+		t.Errorf("First() mismatch: %+v", first)
+	}
+
+	// Error()
+	msg := res.Error()
+	if !strings.Contains(msg, "3 validation errors") {
+		t.Errorf("Error() format unexpected: %q", msg)
+	}
+}
+
+func TestValidateAll_PerFieldFailFast(t *testing.T) {
+	type s struct {
+		A string `required:"true" minLength:"5"`
+	}
+	// A fails both required and minLength, but only required should be collected
+	res := ValidateAll(s{A: ""})
+	if res.Valid {
+		t.Fatal("expected Valid=false")
+	}
+	if len(res.Errors) != 1 {
+		t.Fatalf("expected 1 error per field, got %d", len(res.Errors))
+	}
+	if res.Errors[0].Rule != "required" {
+		t.Errorf("expected required error, got %s", res.Errors[0].Rule)
+	}
+}
+
+func TestValidateAll_NestedErrors(t *testing.T) {
+	type inner struct {
+		X string `required:"true"`
+		Y int    `min:"10"`
+	}
+	type outer struct {
+		Inner inner
+		Z     string `required:"true"`
+	}
+
+	res := ValidateAll(outer{
+		Inner: inner{X: "", Y: 5},
+		Z:     "",
+	})
+
+	if res.Valid || len(res.Errors) != 3 {
+		t.Fatalf("expected 3 errors, got %d", len(res.Errors))
+	}
+
+	if res.Errors[0].Field != "Inner.X" {
+		t.Errorf("error 0 mismatch: %s", res.Errors[0].Field)
+	}
+	if res.Errors[1].Field != "Inner.Y" {
+		t.Errorf("error 1 mismatch: %s", res.Errors[1].Field)
+	}
+	if res.Errors[2].Field != "Z" {
+		t.Errorf("error 2 mismatch: %s", res.Errors[2].Field)
+	}
+}
+
+func TestValidateAll_NilInput(t *testing.T) {
+	res := ValidateAll(nil)
+	if res.Valid {
+		t.Fatal("expected Valid=false for nil input")
+	}
+	if len(res.Errors) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(res.Errors))
+	}
+	if res.Errors[0].Rule != "input" {
+		t.Errorf("expected 'input' rule error, got %s", res.Errors[0].Rule)
 	}
 }
