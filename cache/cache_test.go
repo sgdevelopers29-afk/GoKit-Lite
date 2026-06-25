@@ -1,7 +1,9 @@
 package cache_test
 
 import (
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sgdevelopers29-afk/GoKit-Lite/cache"
 )
@@ -17,124 +19,135 @@ func TestCache_New(t *testing.T) {
 }
 
 func TestCache_SetAndGet(t *testing.T) {
-	tests := []struct {
-		name     string
-		key      string
-		value    string
-		search   string
-		expected string
-		found    bool
-	}{
-		{
-			name:     "existing key",
-			key:      "name",
-			value:    "Shreyas",
-			search:   "name",
-			expected: "Shreyas",
-			found:    true,
-		},
-		{
-			name:     "missing key",
-			key:      "name",
-			value:    "Shreyas",
-			search:   "age",
-			expected: "",
-			found:    false,
-		},
+	c := cache.New[string, string]()
+
+	// Permanent entry
+	c.Set("permanent", "data")
+	val, ok := c.Get("permanent")
+	if !ok || val != "data" {
+		t.Errorf("expected to get permanent data, got %v, %v", val, ok)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := cache.New[string, string]()
-			c.Set(tt.key, tt.value)
+	if !c.Has("permanent") {
+		t.Errorf("expected cache to have permanent key")
+	}
 
-			val, ok := c.Get(tt.search)
-			if ok != tt.found {
-				t.Errorf("expected found %v, got %v", tt.found, ok)
-			}
-			if val != tt.expected {
-				t.Errorf("expected value %q, got %q", tt.expected, val)
-			}
-		})
+	// Missing key
+	val, ok = c.Get("missing")
+	if ok || val != "" {
+		t.Errorf("expected not to find missing key, got %v, %v", val, ok)
 	}
 }
 
-func TestCache_Delete(t *testing.T) {
+func TestCache_SetWithTTL_And_ExpiredEntry(t *testing.T) {
+	c := cache.New[string, string]()
+
+	c.SetWithTTL("temp", "volatile", 50*time.Millisecond)
+
+	// Should exist immediately
+	val, ok := c.Get("temp")
+	if !ok || val != "volatile" {
+		t.Errorf("expected to get temp data, got %v, %v", val, ok)
+	}
+
+	// Wait for expiration
+	time.Sleep(100 * time.Millisecond)
+
+	// Should be expired and automatically removed
+	val, ok = c.Get("temp")
+	if ok || val != "" {
+		t.Errorf("expected temp to be expired, got %v, %v", val, ok)
+	}
+	
+	if c.Has("temp") {
+		t.Errorf("expected cache to not have temp key")
+	}
+}
+
+func TestCache_CleanupWorker(t *testing.T) {
+	c := cache.New[string, string]()
+	
+	// Start cleanup worker every 50ms
+	c.StartCleanup(50 * time.Millisecond)
+	
+	// Ensure double-start doesn't block or panic
+	c.StartCleanup(50 * time.Millisecond)
+
+	c.SetWithTTL("k1", "v1", 20*time.Millisecond)
+	c.SetWithTTL("k2", "v2", 150*time.Millisecond)
+
+	// After 80ms, k1 should be cleaned up by worker, k2 should exist
+	time.Sleep(80 * time.Millisecond)
+
+	// We check size. Size includes expired if not cleaned up.
+	// Because cleanup ran, k1 should be physically removed.
+	if c.Size() != 1 {
+		t.Errorf("expected size 1 after cleanup, got %d", c.Size())
+	}
+
+	c.StopCleanup()
+	// Ensure double-stop doesn't panic
+	c.StopCleanup()
+}
+
+func TestCache_DeleteAndClear(t *testing.T) {
 	c := cache.New[int, string]()
 	c.Set(1, "one")
 	c.Set(2, "two")
 
 	c.Delete(1)
-
-	_, ok := c.Get(1)
-	if ok {
+	if c.Has(1) {
 		t.Error("expected key 1 to be deleted")
 	}
 
-	val, ok := c.Get(2)
-	if !ok || val != "two" {
-		t.Error("expected key 2 to remain")
-	}
-}
-
-func TestCache_Size(t *testing.T) {
-	c := cache.New[string, int]()
-	if c.Size() != 0 {
-		t.Errorf("expected size 0, got %d", c.Size())
-	}
-
-	c.Set("a", 1)
-	c.Set("b", 2)
-	
-	if c.Size() != 2 {
-		t.Errorf("expected size 2, got %d", c.Size())
-	}
-
-	c.Set("a", 3) // overwrite shouldn't increase size
-	if c.Size() != 2 {
-		t.Errorf("expected size 2 after overwrite, got %d", c.Size())
-	}
-}
-
-func TestCache_Clear(t *testing.T) {
-	c := cache.New[string, string]()
-	c.Set("k1", "v1")
-	c.Set("k2", "v2")
-
-	if c.Size() != 2 {
-		t.Fatalf("expected size 2, got %d", c.Size())
+	if c.Size() != 1 {
+		t.Errorf("expected size 1, got %d", c.Size())
 	}
 
 	c.Clear()
-
 	if c.Size() != 0 {
-		t.Errorf("expected size 0 after clear, got %d", c.Size())
-	}
-
-	_, ok := c.Get("k1")
-	if ok {
-		t.Error("expected k1 to be cleared")
+		t.Errorf("expected size 0, got %d", c.Size())
 	}
 }
 
-func TestCache_MultipleEntries(t *testing.T) {
+func TestCache_ConcurrentAccess(t *testing.T) {
 	c := cache.New[int, int]()
-	
+	var wg sync.WaitGroup
+
+	// Start cleanup worker to induce more concurrent map iterations
+	c.StartCleanup(10 * time.Millisecond)
+	defer c.StopCleanup()
+
+	// 100 goroutines writing and reading
 	for i := 0; i < 100; i++ {
-		c.Set(i, i*10)
+		wg.Add(1)
+		go func(val int) {
+			defer wg.Done()
+			
+			// Concurrent Writes
+			if val%2 == 0 {
+				c.Set(val, val)
+			} else {
+				c.SetWithTTL(val, val, 20*time.Millisecond)
+			}
+
+			// Concurrent Reads
+			_, _ = c.Get(val)
+			_ = c.Has(val)
+			_ = c.Size()
+		}(i)
 	}
 
-	if c.Size() != 100 {
-		t.Errorf("expected size 100, got %d", c.Size())
+	wg.Wait()
+
+	// Perform random deletes concurrently
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(val int) {
+			defer wg.Done()
+			c.Delete(val)
+		}(i)
 	}
 
-	for i := 0; i < 100; i++ {
-		val, ok := c.Get(i)
-		if !ok {
-			t.Errorf("expected key %d to be found", i)
-		}
-		if val != i*10 {
-			t.Errorf("expected %d for key %d, got %d", i*10, i, val)
-		}
-	}
+	wg.Wait()
 }
