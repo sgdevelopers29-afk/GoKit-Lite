@@ -25,29 +25,130 @@
 
 ## Why GoKit-Lite?
 
-Most Go backend projects end up re-implementing the same building blocks — standardized API responses, input validation, JWT authentication, caching, rate limiting, and monitoring. GoKit-Lite packages these recurring patterns into a cohesive, zero-bloat toolkit that stays out of your way.
+Every Go backend project eventually needs the same building blocks — standardized API responses, input validation, JWT authentication, caching, rate limiting, and monitoring. Most teams either cobble these together from scattered packages with conflicting conventions or rewrite them from scratch each time.
 
-**Design principles:**
+GoKit-Lite solves this by packaging these recurring patterns into a single, cohesive toolkit:
 
-- **Zero framework lock-in** — every package works with `net/http` and the standard library.
-- **Minimal dependencies** — only [`golang-jwt/jwt`](https://github.com/golang-jwt/jwt) for the `auth` package; everything else is stdlib-only.
-- **Pick what you need** — import a single package without pulling in the entire toolkit.
-- **Production-ready defaults** — thread-safe, well-tested, and benchmarked.
+- **Stop reinventing infrastructure** — battle-tested utilities out of the box.
+- **Consistent API contracts** — all packages follow the same design patterns and documentation standards.
+- **Gradual adoption** — import one package today, add more as you need them. No all-or-nothing commitment.
+- **No vendor lock-in** — every package works with `net/http` and any router of your choice.
+
+---
+
+## Design Principles
+
+| Principle | What It Means |
+|-----------|---------------|
+| **Standard library first** | Only one external dependency (`golang-jwt/jwt` for `auth`). Everything else is pure stdlib. |
+| **Framework agnostic** | Works with `net/http`, Gin, Echo, Chi, Fiber, or any Go HTTP framework. |
+| **Modular by design** | Each package is fully independent — import only what you need. |
+| **Production-ready** | Thread-safe, well-tested, benchmarked, and documented. |
+| **Easy to extend** | Register custom validators, create scoped auth managers, or build named monitors. |
+| **Minimal API surface** | Small, focused interfaces that are easy to learn and hard to misuse. |
+
+---
+
+## Compatibility
+
+GoKit-Lite is **framework-independent**. All packages use standard Go interfaces (`http.Handler`, `context.Context`, `error`) and work seamlessly with:
+
+| Framework | Compatible | Notes |
+|-----------|:----------:|-------|
+| `net/http` | ✅ | Native support — all middleware and handlers use `http.Handler` |
+| [Chi](https://github.com/go-chi/chi) | ✅ | `auth.RequireAuth` works directly as Chi middleware |
+| [Gin](https://github.com/gin-gonic/gin) | ✅ | Wrap with `gin.WrapH()` for middleware, use packages directly in handlers |
+| [Echo](https://github.com/labstack/echo) | ✅ | Wrap with `echo.WrapMiddleware()` for middleware |
+| [Fiber](https://github.com/gofiber/fiber) | ✅ | Use adaptor package (`fibadaptor`) to bridge `http.Handler` |
+
+> **Note:** GoKit-Lite does not import or depend on any of these frameworks. It produces and consumes standard library types only.
 
 ---
 
 ## Features
 
-| Package | Description | Docs |
-|---------|-------------|------|
-| [`response`](response/) | Standardized JSON API envelope (`Success` / `Error`) | [response.md](docs/response.md) |
-| [`validator`](validator/) | Tag-based struct validation with 9 built-in rules, custom validators, and recursive nested support | [validator.md](docs/validator.md) |
-| [`auth`](auth/) | JWT generation, validation, and `net/http` middleware (HMAC-SHA256) | [auth.md](docs/auth.md) |
-| [`config`](config/) | Environment variable management with `.env` file loading | [config.md](docs/config.md) |
-| [`cache`](cache/) | Generic, thread-safe in-memory cache with TTL and background cleanup | [cache.md](docs/cache.md) |
-| [`logger`](logger/) | Simple, structured JSON logging (`INFO` / `ERROR`) | [logger.md](docs/logger.md) |
-| [`monitor`](monitor/) | Lock-free request metrics — counts, success rate, and latency tracking | [monitor.md](docs/monitor.md) |
-| [`ratelimit`](ratelimit/) | Token-bucket rate limiter with per-key tracking | [ratelimit.md](docs/ratelimit.md) |
+| Package | Description | Status | Docs |
+|---------|-------------|:------:|------|
+| [`response`](response/) | Standardized JSON API envelope with `Success()` and `Error()` helpers | ✅ Stable | [response.md](docs/response.md) |
+| [`validator`](validator/) | Tag-based struct validation — 9 built-in rules, custom validators, recursive nested support | ✅ Stable | [validator.md](docs/validator.md) |
+| [`auth`](auth/) | JWT generation, validation, and `net/http` middleware using HMAC-SHA256 | ✅ Stable | [auth.md](docs/auth.md) |
+| [`config`](config/) | Environment variable management with `.env` file loading | ✅ Stable | [config.md](docs/config.md) |
+| [`cache`](cache/) | Generic, thread-safe in-memory cache with TTL and background cleanup | ✅ Stable | [cache.md](docs/cache.md) |
+| [`logger`](logger/) | Structured JSON logging with `INFO` and `ERROR` levels | ✅ Stable | [logger.md](docs/logger.md) |
+| [`monitor`](monitor/) | Lock-free request metrics — counts, success rate, and latency tracking | ✅ Stable | [monitor.md](docs/monitor.md) |
+| [`ratelimit`](ratelimit/) | Token-bucket rate limiter with per-key tracking | ✅ Stable | [ratelimit.md](docs/ratelimit.md) |
+
+---
+
+## Architecture
+
+### Package Overview
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                        Your Application                              │
+│                                                                      │
+│  ┌───────────┐ ┌───────────┐ ┌──────────┐ ┌────────┐ ┌───────────┐ │
+│  │ response  │ │ validator │ │   auth   │ │ config │ │   cache   │ │
+│  │           │ │           │ │          │ │        │ │           │ │
+│  │ Success() │ │ Validate()│ │ Generate │ │ Load() │ │ Get/Set   │ │
+│  │ Error()   │ │ ValidAll()│ │ Validate │ │ Get()  │ │ TTL       │ │
+│  │           │ │ Register()│ │ Require  │ │        │ │ Cleanup   │ │
+│  └───────────┘ └───────────┘ └──────────┘ └────────┘ └───────────┘ │
+│                                                                      │
+│  ┌───────────┐ ┌───────────┐ ┌───────────┐                         │
+│  │  logger   │ │  monitor  │ │ ratelimit │                         │
+│  │           │ │           │ │           │                         │
+│  │ Info()    │ │ Record*() │ │ Allow()   │                         │
+│  │ Error()   │ │ GetStats()│ │           │                         │
+│  └───────────┘ └───────────┘ └───────────┘                         │
+│                                                                      │
+│  Each package is independent — no inter-package dependencies.        │
+│  Only auth depends on golang-jwt/jwt. Everything else is stdlib.     │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Typical Request Flow
+
+```
+Client Request
+     │
+     ▼
+┌─────────────┐
+│  ratelimit  │──── Too many requests? → 429 Response
+│  Allow()    │
+└──────┬──────┘
+       │ allowed
+       ▼
+┌─────────────┐
+│    auth     │──── Invalid/missing token? → 401 Response
+│ RequireAuth │
+└──────┬──────┘
+       │ authenticated
+       ▼
+┌─────────────┐
+│  validator  │──── Validation failed? → 422 Response
+│ Validate()  │
+└──────┬──────┘
+       │ valid
+       ▼
+┌─────────────┐     ┌─────────────┐
+│  Business   │────►│   cache     │  (optional: cache lookups)
+│   Logic     │     │ Get/Set     │
+└──────┬──────┘     └─────────────┘
+       │
+       ▼
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  response   │     │  monitor    │     │   logger    │
+│ Success()   │     │ Record*()   │     │ Info/Error  │
+│  Error()    │     │ GetStats()  │     │             │
+└──────┬──────┘     └─────────────┘     └─────────────┘
+       │
+       ▼
+  JSON Response
+```
+
+> See [docs/architecture.md](docs/architecture.md) for detailed request lifecycle diagrams with code examples.
 
 ---
 
@@ -276,6 +377,45 @@ func profileHandler(w http.ResponseWriter, r *http.Request) {
 
 ---
 
+## Performance
+
+GoKit-Lite packages are designed for high-throughput backend systems. Key packages include benchmarks you can run locally:
+
+```bash
+go test -bench=. -benchmem ./...
+```
+
+### Expected Performance Characteristics
+
+| Package | Operation | Expected | Allocations | Benchmark File |
+|---------|-----------|----------|:-----------:|----------------|
+| `cache` | `Get` (hit) | ~10–50 ns/op | 0 allocs/op | `cache/cache_benchmark_test.go` |
+| `cache` | `Set` | ~50–100 ns/op | 0 allocs/op | `cache/cache_benchmark_test.go` |
+| `ratelimit` | `Allow` | ~10–30 ns/op | 0 allocs/op | `ratelimit/ratelimit_benchmark_test.go` |
+| `config` | `Get` | ~20–50 ns/op | 0 allocs/op | `config/config_benchmark_test.go` |
+| `config` | `Load` | one-time boot cost | — | `config/config_benchmark_test.go` |
+| `monitor` | `RecordRequest` | lock-free atomic | 0 allocs/op | — |
+| `validator` | `Validate` (5 fields) | *placeholder* | — | — |
+| `auth` | `GenerateToken` | *placeholder* | — | — |
+
+> *Placeholder* entries do not yet have dedicated benchmark tests. Contributions welcome!
+
+See [docs/performance.md](docs/performance.md) for the full benchmarking methodology and interpretation guide.
+
+---
+
+## Project Goals
+
+GoKit-Lite aims to be the **go-to utility belt** for Go backend developers who value:
+
+- **Reusability** — write once, use across every project.
+- **Readability** — clear, idiomatic Go code that's easy to understand and contribute to.
+- **Maintainability** — small packages with focused responsibilities and comprehensive tests.
+- **Performance** — hot paths are lock-free or use `sync.RWMutex`; zero allocations where possible.
+- **Minimal dependencies** — one external dependency across all 8 packages.
+
+---
+
 ## Project Structure
 
 ```text
@@ -284,29 +424,46 @@ GoKit-Lite/
 │   ├── auth.go         # Manager, GenerateToken, ValidateToken
 │   ├── claims.go       # Claims struct definition
 │   ├── errors.go       # Sentinel error variables
-│   └── middleware.go   # RequireAuth, ClaimsFromContext
+│   ├── middleware.go   # RequireAuth, ClaimsFromContext
+│   ├── auth_test.go
+│   └── example_test.go
 ├── cache/              # Generic in-memory cache with TTL
-│   └── cache.go        # Cache[K,V] with Set, Get, Delete, cleanup
+│   ├── cache.go        # Cache[K,V] with Set, Get, Delete, cleanup
+│   ├── cache_test.go
+│   └── cache_benchmark_test.go
 ├── config/             # Environment variable management
 │   ├── config.go       # Get (env var lookup)
-│   └── loader.go       # Load (.env file parser)
+│   ├── loader.go       # Load (.env file parser)
+│   ├── .env.example    # Template for required settings
+│   ├── config_test.go
+│   ├── config_benchmark_test.go
+│   └── loader_test.go
 ├── logger/             # Structured JSON logging
-│   └── logger.go       # Info, Error
+│   ├── logger.go       # Info, Error
+│   └── logger_test.go
 ├── monitor/            # Request metrics tracking
 │   ├── monitor.go      # Monitor type and package-level API
 │   ├── stats.go        # Lock-free tracker implementation
-│   └── types.go        # Stats struct definition
+│   ├── types.go        # Stats struct definition
+│   ├── monitor_test.go
+│   └── example_test.go
 ├── ratelimit/          # Token-bucket rate limiter
-│   └── ratelimit.go    # Limiter with Allow(key)
+│   ├── ratelimit.go    # Limiter with Allow(key)
+│   ├── ratelimit_test.go
+│   └── ratelimit_benchmark_test.go
 ├── response/           # Standardized API responses
-│   └── response.go     # Success, Error
+│   ├── response.go     # Success, Error
+│   └── response_test.go
 ├── validator/          # Tag-based struct validation
 │   ├── validator.go    # Validate, ValidateAll, Register
-│   └── errors.go       # ValidationError, Result
+│   ├── errors.go       # ValidationError, Result
+│   ├── validator_test.go
+│   └── example_test.go
 ├── docs/               # Package documentation
 │   ├── getting-started.md
 │   ├── architecture.md
 │   ├── performance.md
+│   ├── roadmap.md
 │   └── <package>.md    # Per-package guides
 ├── examples/           # Runnable example programs
 │   ├── user-api/       # Full REST API example
@@ -317,7 +474,6 @@ GoKit-Lite/
 ├── LICENSE
 ├── CONTRIBUTING.md
 ├── CHANGELOG.md
-├── CODE_OF_CONDUCT.md
 └── SECURITY.md
 ```
 
@@ -327,9 +483,9 @@ GoKit-Lite/
 
 | Document | Description |
 |----------|-------------|
-| [Getting Started](docs/getting-started.md) | Installation and first steps |
+| [Getting Started](docs/getting-started.md) | Installation, prerequisites, and first steps |
 | [Architecture](docs/architecture.md) | Design philosophy and package relationships |
-| [Performance](docs/performance.md) | Benchmarks and optimization notes |
+| [Performance](docs/performance.md) | Benchmarking methodology and optimization notes |
 | [Roadmap](docs/roadmap.md) | Current status and planned features |
 
 **Package guides:** [response](docs/response.md) · [validator](docs/validator.md) · [auth](docs/auth.md) · [config](docs/config.md) · [cache](docs/cache.md) · [logger](docs/logger.md) · [monitor](docs/monitor.md) · [ratelimit](docs/ratelimit.md)
@@ -340,7 +496,7 @@ GoKit-Lite/
 
 | Example | Description | Location |
 |---------|-------------|----------|
-| User API | Full REST API with auth, validation, and monitoring | [`examples/user-api/`](examples/user-api/) |
+| User API | Full REST API with auth, validation, response, and monitoring | [`examples/user-api/`](examples/user-api/) |
 | Response | Basic response envelope usage | [`examples/response/`](examples/response/) |
 | Monitor | Request metrics simulation and multi-monitor demo | [`examples/monitor/`](examples/monitor/) |
 
@@ -380,18 +536,32 @@ go tool cover -html=coverage.out
 
 ## Roadmap
 
+### ✅ Completed
+
 - [x] `response` — Standardized API responses
 - [x] `validator` — Tag-based struct validation (V1–V5)
 - [x] `auth` — JWT generation, validation, middleware
-- [x] `config` — Environment variable management
+- [x] `config` — Environment variable management with `.env` loading
 - [x] `cache` — Generic in-memory cache with TTL
 - [x] `logger` — Structured JSON logging
-- [x] `monitor` — Request metrics tracking
+- [x] `monitor` — Lock-free request metrics tracking
 - [x] `ratelimit` — Token-bucket rate limiting
-- [ ] CI/CD — GitHub Actions workflow
-- [ ] Additional log levels (`DEBUG`, `WARN`)
-- [ ] HTTP middleware for rate limiting
-- [ ] Prometheus metrics exposition
+- [x] Documentation suite (`docs/`)
+- [x] Runnable examples (`examples/`)
+
+### 🔜 In Progress
+
+- [ ] CI/CD — GitHub Actions workflow for automated testing
+- [ ] Repository polish — CONTRIBUTING.md, CHANGELOG.md, SECURITY.md
+
+### 💡 Future Ideas
+
+- [ ] Additional log levels (`DEBUG`, `WARN`, `FATAL`)
+- [ ] HTTP middleware wrapper for rate limiting
+- [ ] Prometheus metrics exposition in `monitor`
+- [ ] Health check HTTP endpoints in `monitor`
+- [ ] Contextual fields for `logger` (request ID, trace ID)
+- [ ] Redis/Memcached adapter for `cache`
 
 See the full [Roadmap](docs/roadmap.md) for details.
 
@@ -424,6 +594,8 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 | Name | Role | GitHub |
 |------|------|--------|
 | SGDevelopers | Lead Maintainer | [@sgdevelopers29-afk](https://github.com/sgdevelopers29-afk) |
+
+**Want to contribute?** We'd love to have you! Check the [issues tab](https://github.com/sgdevelopers29-afk/GoKit-Lite/issues) for good first issues, or open one to discuss your idea. Every contribution — from typo fixes to new packages — makes GoKit-Lite better for the community.
 
 ---
 
