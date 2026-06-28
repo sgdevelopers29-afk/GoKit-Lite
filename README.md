@@ -602,3 +602,6 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 <p align="center">
   Built with ❤️ in Go &nbsp;·&nbsp; <a href="https://github.com/sgdevelopers29-afk/GoKit-Lite">Star us on GitHub</a>
 </p>
+
+
+**sgdevelopers29-afk/GoKit-Lite** is an open-source project. Contributions are welcome! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) guide before submitting a pull request.
