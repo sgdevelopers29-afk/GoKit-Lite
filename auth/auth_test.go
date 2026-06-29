@@ -10,6 +10,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// This function test the basic JWT generation and validation
 func TestGenerateAndValidateToken_Valid(t *testing.T) {
 	mgr := NewManager("test-secret", 1*time.Hour)
 
