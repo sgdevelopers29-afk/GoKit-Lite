@@ -57,8 +57,8 @@ type noTagUser struct {
 
 // unexportedUser ensures unexported fields are skipped without panic.
 type unexportedUser struct {
-	Name    string `required:"true"`
-	secret  string `required:"true"` //nolint:unused // intentionally unexported
+	Name   string `required:"true"`
+	secret string `required:"true"` //nolint:unused // intentionally unexported
 }
 
 // ── Helper ────────────────────────────────────────────────────────────────────
@@ -295,7 +295,7 @@ func TestValidate_Email_Invalid(t *testing.T) {
 		"missing-at-sign",
 		"user@",
 		"@",
-		"user@domain",   // no TLD
+		"user@domain",     // no TLD
 		"user @gmail.com", // space inside
 		"",
 	}
@@ -426,11 +426,11 @@ type oneOfUser struct {
 
 // v3FullUser exercises every V3 tag alongside V2 tags.
 type v3FullUser struct {
-	Name     string `required:"true" minLength:"2" maxLength:"50"`
-	Age      int    `min:"18" max:"120"`
-	Email    string `required:"true" email:"true"`
-	Phone    string `regex:"^[0-9]{10}$"`
-	Role     string `oneOf:"admin,user,guest"`
+	Name  string `required:"true" minLength:"2" maxLength:"50"`
+	Age   int    `min:"18" max:"120"`
+	Email string `required:"true" email:"true"`
+	Phone string `regex:"^[0-9]{10}$"`
+	Role  string `oneOf:"admin,user,guest"`
 }
 
 // ── minLength ─────────────────────────────────────────────────────────────────
@@ -798,8 +798,8 @@ type v4Address struct {
 
 // v4User is a top-level struct that embeds a nested struct, a slice, and a map.
 type v4User struct {
-	Name     string            `required:"true" minLength:"2"`
-	Age      int               `min:"18" max:"120"`
+	Name     string `required:"true" minLength:"2"`
+	Age      int    `min:"18" max:"120"`
 	Address  v4Address
 	Skills   []string          `required:"true"`
 	Metadata map[string]string `required:"true"`
@@ -895,7 +895,7 @@ func TestValidate_V4_PointerToNestedStruct_Valid(t *testing.T) {
 		Bio string `required:"true"`
 	}
 	type user struct {
-		Name    string   `required:"true"`
+		Name    string `required:"true"`
 		Profile *profile
 	}
 	u := user{Name: "Ganesh", Profile: &profile{Bio: "developer"}}
@@ -940,7 +940,7 @@ func TestValidate_V4_PointerToNestedStruct_InvalidInner(t *testing.T) {
 		Bio string `required:"true"`
 	}
 	type user struct {
-		Name    string   `required:"true"`
+		Name    string `required:"true"`
 		Profile *profile
 	}
 	u := user{Name: "Ganesh", Profile: &profile{Bio: ""}}
@@ -1171,7 +1171,7 @@ func TestValidate_V4_Mixed_NestedStructFailsFirst(t *testing.T) {
 		Name:     "Ganesh",
 		Age:      25,
 		Address:  v4Address{City: "", Pincode: "411001"}, // invalid
-		Skills:   []string{},                              // also invalid, checked after
+		Skills:   []string{},                             // also invalid, checked after
 		Metadata: map[string]string{"team": "backend"},
 	}
 	err := Validate(u)
@@ -1184,7 +1184,7 @@ func TestValidate_V4_Mixed_SliceFailsAfterNested(t *testing.T) {
 		Name:     "Ganesh",
 		Age:      25,
 		Address:  v4Address{City: "Pune", Pincode: "411001"},
-		Skills:   nil,                                     // invalid — required
+		Skills:   nil, // invalid — required
 		Metadata: map[string]string{"team": "backend"},
 	}
 	err := Validate(u)
@@ -1238,7 +1238,7 @@ func TestValidate_V4_EmptyNestedStruct_NoTags_Passes(t *testing.T) {
 func TestValidate_V4_QualifiedName_MultiLevelSliceStruct(t *testing.T) {
 	// Slice of structs, each of which has its own nested struct.
 	type inner struct {
-		Tag   v4Tag
+		Tag v4Tag
 	}
 	type outer struct {
 		Items []inner

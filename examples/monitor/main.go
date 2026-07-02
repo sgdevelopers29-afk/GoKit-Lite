@@ -166,7 +166,7 @@ func main() {
 	// log.Println("Server starting on :8080")
 	// log.Fatal(http.ListenAndServe(":8080", nil))
 
-	_ = loginHandler  // avoid unused warning in simulation mode
+	_ = loginHandler // avoid unused warning in simulation mode
 	_ = metricsHandler
 	_ = log.Println
 }

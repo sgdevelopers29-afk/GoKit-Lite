@@ -72,7 +72,7 @@ func TestLoad(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join(tempDir, tt.fileName)
-			
+
 			// Only create the file if it's not the "Missing file" test case
 			if tt.name != "Missing file" {
 				err := os.WriteFile(path, []byte(tt.fileContent), 0644)

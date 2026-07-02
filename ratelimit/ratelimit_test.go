@@ -17,7 +17,7 @@ func TestNewLimiter(t *testing.T) {
 
 func TestAllowWithinLimit(t *testing.T) {
 	l := ratelimit.New(5, 5)
-	
+
 	for i := 0; i < 5; i++ {
 		if !l.Allow("user1") {
 			t.Errorf("expected request %d to be allowed", i)
@@ -27,7 +27,7 @@ func TestAllowWithinLimit(t *testing.T) {
 
 func TestExceedingLimit(t *testing.T) {
 	l := ratelimit.New(5, 5)
-	
+
 	// Consume all 5 burst tokens
 	for i := 0; i < 5; i++ {
 		if !l.Allow("user1") {

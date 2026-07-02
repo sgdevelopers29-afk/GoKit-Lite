@@ -9,11 +9,11 @@ import (
 // Every field is accessed exclusively through atomic operations so that
 // no mutex is required, giving lock-free performance under contention.
 type tracker struct {
-	requests      atomic.Int64
-	successes     atomic.Int64
-	errors        atomic.Int64
-	totalLatency  atomic.Int64 // stored as nanoseconds
-	latencyCount  atomic.Int64 // number of latency samples recorded
+	requests     atomic.Int64
+	successes    atomic.Int64
+	errors       atomic.Int64
+	totalLatency atomic.Int64 // stored as nanoseconds
+	latencyCount atomic.Int64 // number of latency samples recorded
 }
 
 // recordRequest atomically increments the request counter by one.

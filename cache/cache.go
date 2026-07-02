@@ -32,7 +32,7 @@ func New[K comparable, V any]() *Cache[K, V] {
 func (c *Cache[K, V]) Set(key K, value V) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	
+
 	c.store[key] = cacheItem[V]{
 		Value: value,
 		// Zero time means it never expires.
@@ -68,13 +68,13 @@ func (c *Cache[K, V]) Get(key K) (V, bool) {
 		// Lock to remove expired item
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		
+
 		// Double check to ensure it wasn't updated by another goroutine during lock escalation
 		item, ok = c.store[key]
 		if ok && !item.ExpiresAt.IsZero() && time.Now().After(item.ExpiresAt) {
 			delete(c.store, key)
 		}
-		
+
 		var zero V
 		return zero, false
 	}

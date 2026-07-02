@@ -57,7 +57,7 @@ func main() {
 	fmt.Println("╔══════════════════════════════════════════════════╗")
 	fmt.Println("║         GoKit-Lite — User API Example            ║")
 	fmt.Println("╠══════════════════════════════════════════════════╣")
-	fmt.Printf( "║  Listening on  http://localhost%s              ║\n", addr)
+	fmt.Printf("║  Listening on  http://localhost%s              ║\n", addr)
 	fmt.Println("║                                                  ║")
 	fmt.Println("║  Routes:                                         ║")
 	fmt.Println("║    GET  /health      — liveness probe            ║")
