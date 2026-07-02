@@ -1,0 +1,67 @@
+name: GoKit-Lite CI
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+  pull_request:
+    branches:
+      - develop
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build, Test & Verify
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Verify Go Version
+        run: go version
+
+      - name: Download Dependencies
+        run: go mod download
+
+      - name: Verify Module
+        run: |
+          go mod tidy
+          git diff --exit-code
+
+      - name: Check Formatting
+        run: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "The following files are not formatted:"
+            echo "$files"
+            exit 1
+          fi
+
+      - name: Run Go Vet
+        run: go vet ./...
+
+      - name: Run Unit Tests
+        run: go test -v ./...
+
+      - name: Run Race Detector
+        run: go test -race ./...
+
+      - name: Run Coverage & Display Stats
+        run: |
+          go test -coverprofile=coverage.out $(go list ./... | grep -v /examples)
+          go tool cover -func=coverage.out
+
+      - name: Benchmark Core Infrastructure
+        # Consolidated to a single command for cleaner CI logs
+        run: go test -bench="." -benchmem ./config ./cache ./ratelimit

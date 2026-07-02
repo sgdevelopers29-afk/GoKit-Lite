@@ -58,7 +58,7 @@ func TestCache_SetWithTTL_And_ExpiredEntry(t *testing.T) {
 	if ok || val != "" {
 		t.Errorf("expected temp to be expired, got %v, %v", val, ok)
 	}
-	
+
 	if c.Has("temp") {
 		t.Errorf("expected cache to not have temp key")
 	}
@@ -66,10 +66,10 @@ func TestCache_SetWithTTL_And_ExpiredEntry(t *testing.T) {
 
 func TestCache_CleanupWorker(t *testing.T) {
 	c := cache.New[string, string]()
-	
+
 	// Start cleanup worker every 50ms
 	c.StartCleanup(50 * time.Millisecond)
-	
+
 	// Ensure double-start doesn't block or panic
 	c.StartCleanup(50 * time.Millisecond)
 
@@ -123,7 +123,7 @@ func TestCache_ConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(val int) {
 			defer wg.Done()
-			
+
 			// Concurrent Writes
 			if val%2 == 0 {
 				c.Set(val, val)

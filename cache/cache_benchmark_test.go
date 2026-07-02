@@ -31,7 +31,7 @@ func BenchmarkCacheDelete(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// Deleting a missing key evaluates the map lookup and delete performance
-		c.Delete("key_non_existent") 
+		c.Delete("key_non_existent")
 	}
 }
 

@@ -49,7 +49,7 @@ func BenchmarkTokenRefill(b *testing.B) {
 	l := ratelimit.New(10, 10)
 	l.Allow("user") // Force lazy init
 	b.ResetTimer()
-	
+
 	// Running this in a tight loop tests the computational overhead of the token math
 	for i := 0; i < b.N; i++ {
 		l.Allow("user")

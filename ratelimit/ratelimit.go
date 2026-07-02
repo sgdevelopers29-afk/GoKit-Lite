@@ -38,7 +38,7 @@ func (l *Limiter) Allow(key string) bool {
 	defer l.mu.Unlock()
 
 	now := time.Now()
-	
+
 	b, exists := l.buckets[key]
 	if !exists {
 		// Lazy initialization of a new bucket
@@ -52,15 +52,15 @@ func (l *Limiter) Allow(key string) bool {
 
 	// Calculate tokens to add based on elapsed time since last visit
 	elapsedSeconds := now.Sub(b.lastVisit).Seconds()
-	
+
 	// Refill the bucket
 	b.tokens += elapsedSeconds * l.rate
-	
+
 	// Cap the tokens at the maximum burst size
 	if b.tokens > l.burst {
 		b.tokens = l.burst
 	}
-	
+
 	b.lastVisit = now
 
 	// Check if there's at least 1 token available to consume
