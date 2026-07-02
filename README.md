@@ -549,15 +549,11 @@ go tool cover -html=coverage.out
 - [x] Documentation suite (`docs/`)
 - [x] Runnable examples (`examples/`)
 
-### 🔜 In Progress
-
-- [ ] CI/CD — GitHub Actions workflow for automated testing
-- [ ] Repository polish — CONTRIBUTING.md, CHANGELOG.md, SECURITY.md
+- [x] CI/CD — GitHub Actions workflow for automated testing
+- [x] Repository polish — CONTRIBUTING.md, CHANGELOG.md, SECURITY.md
 
 ### 💡 Future Ideas
 
-- [ ] Additional log levels (`DEBUG`, `WARN`, `FATAL`)
-- [ ] HTTP middleware wrapper for rate limiting
 - [ ] Prometheus metrics exposition in `monitor`
 - [ ] Health check HTTP endpoints in `monitor`
 - [ ] Contextual fields for `logger` (request ID, trace ID)
@@ -605,6 +601,3 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 
 **sgdevelopers29-afk/GoKit-Lite** is an open-source project. Contributions are welcome! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) guide before submitting a pull request.
-
-
-------------*********--------------
