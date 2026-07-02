@@ -119,10 +119,11 @@ func (c *Cache[K, V]) StartCleanup(interval time.Duration) {
 		c.mu.Unlock()
 		return
 	}
-	c.stopCleanup = make(chan struct{})
+	stopChan := make(chan struct{})
+	c.stopCleanup = stopChan
 	c.mu.Unlock()
 
-	go func() {
+	go func(stop <-chan struct{}) {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
@@ -130,11 +131,11 @@ func (c *Cache[K, V]) StartCleanup(interval time.Duration) {
 			select {
 			case <-ticker.C:
 				c.DeleteExpired()
-			case <-c.stopCleanup:
+			case <-stop:
 				return
 			}
 		}
-	}()
+	}(stopChan)
 }
 
 // StopCleanup gracefully signals the background cleanup worker to stop.
