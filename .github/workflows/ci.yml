@@ -59,7 +59,7 @@ jobs:
 
       - name: Run Coverage & Display Stats
         run: |
-          go test -coverprofile=coverage.out ./...
+          go test -coverprofile=coverage.out $(go list ./... | grep -v /examples)
           go tool cover -func=coverage.out
 
       - name: Benchmark Core Infrastructure
