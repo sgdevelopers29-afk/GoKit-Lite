@@ -41,3 +41,13 @@ func Load(path string) error {
 
 	return nil
 }
+
+// LoadIfExists attempts to load an environment file if it exists.
+// If the file does not exist, it safely returns nil without error.
+// If the file exists but has parsing errors, those errors are returned.
+func LoadIfExists(path string) error {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+	return Load(path)
+}

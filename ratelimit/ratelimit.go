@@ -1,6 +1,8 @@
 package ratelimit
 
 import (
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -70,4 +72,28 @@ func (l *Limiter) Allow(key string) bool {
 	}
 
 	return false
+}
+
+// Middleware returns an HTTP middleware that uses the request's RemoteAddr (IP) as the rate limit key.
+// Requests that exceed the rate limit receive a 429 Too Many Requests response.
+func (l *Limiter) Middleware(next http.Handler) http.Handler {
+	return l.MiddlewareWithKeyFunc(func(r *http.Request) string {
+		ip := r.RemoteAddr
+		if i := strings.LastIndex(ip, ":"); i != -1 {
+			ip = ip[:i] // Strip port
+		}
+		return ip
+	}, next)
+}
+
+// MiddlewareWithKeyFunc returns an HTTP middleware that uses a custom function to extract the rate limit key.
+func (l *Limiter) MiddlewareWithKeyFunc(keyFunc func(*http.Request) string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := keyFunc(r)
+		if !l.Allow(key) {
+			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

@@ -3,7 +3,6 @@ package logger_test
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"os"
 	"strings"
 	"testing"
@@ -12,18 +11,13 @@ import (
 	"github.com/sgdevelopers29-afk/GoKit-Lite/logger"
 )
 
-// captureOutput intercepts os.Stdout to capture log output for testing.
+// captureOutput intercepts the logger output for testing.
 func captureOutput(f func()) string {
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
+	var buf bytes.Buffer
+	logger.SetOutput(&buf)
+	defer logger.SetOutput(os.Stdout)
 
 	f()
-
-	w.Close()
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	os.Stdout = oldStdout
 
 	return strings.TrimSpace(buf.String())
 }
